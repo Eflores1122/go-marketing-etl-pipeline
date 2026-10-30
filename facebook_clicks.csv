@@ -1,0 +1,5 @@
+timestamp,user_id,session_key,device_type,campaign,ad_set,spend,utm_channel,fbclid
+2023-01-01 14:00:00,,sess-005,mobile,FB Campaign X,Set 1,1.00,facebook,FBCLID123
+2023-01-01 14:30:00,,sess-006,desktop,FB Campaign X,Set 3,0.80,facebook,FBCLID456
+2023-01-02 10:00:00,user-ghi,sess-007,tablet,FB Campaign Y,Set 2,0.60,facebook,FBCLID789
+2023-01-02 11:00:00,user-abc,sess-008,mobile,FB Campaign Z,Set 3,0.85,facebook,FBCLID987

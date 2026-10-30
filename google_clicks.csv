@@ -1,0 +1,5 @@
+timestamp,user_id,session_key,device_type,campaign,ad_group,cost,utm_channel,gclid
+2023-01-01 12:00:00,,sess-001,mobile,Campaign A,Group 1,0.50,google,GCLID123
+2023-01-01 13:00:00,,sess-002,desktop,Campaign B,Group 2,0.75,google,GCLID456
+2023-01-02 09:00:00,user-ghi,sess-003,tablet,Campaign A,Group 3,0.60,google,GCLID789
+2023-01-02 10:30:00,user-abc,sess-004,mobile,Campaign C,Group 1,0.45,google,GCLID987

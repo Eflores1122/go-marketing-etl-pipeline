@@ -1,0 +1,5 @@
+timestamp,user_id,session_key,device_type,action_type,action_details,utm_channel
+2023-01-01 12:05:00,,sess-001,mobile,view,"{\\"path\\": \\"/home\\"}",google
+2023-01-01 15:00:00,user-abc,sess-005,mobile,purchase,"{\\"type\\": \\"purchase\\", \\"value\\": 100.00}",facebook
+2023-01-01 16:00:00,user-def,sess-006,desktop,signup,"{\\"type\\": \\"signup\\", \\"value\\": 0.00}",google
+2023-01-02 11:00:00,user-ghi,sess-007,tablet,purchase,"{\\"type\\": \\"purchase\\", \\"value\\": 50.00}",facebook
