@@ -9,9 +9,27 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
+)
+
+// Counts from scripts/generate_retail.py with seed 20260311, measured by runPipeline.
+const (
+	sampleUsers          = 636
+	sampleEvents         = 3311
+	sampleClicks         = 907
+	sampleViews          = 2191
+	sampleConversions    = 52
+	sampleGoogleClicks   = 537
+	sampleFacebookClicks = 370
+	sampleWebsiteEvents  = 2404
+	sampleGoogleCost     = 474.70
+	sampleFacebookCost   = 286.21
+	sampleRevenue        = 2463.30
+	sampleMulti          = 17
+	sampleDays           = 26
 )
 
 func TestMain(m *testing.M) {
@@ -25,6 +43,7 @@ func resetPipeline() {
 	trackedUsers = make(map[string]*TrackedUser)
 	events = nil
 	wg = sync.WaitGroup{}
+	resetSkipped()
 }
 
 func writeRaw(t *testing.T, name, body string) string {
@@ -385,7 +404,7 @@ func TestDedupMergeRules(t *testing.T) {
 		t.Fatalf("user id = %q, want the first non-empty id to stick", mobile.UserID)
 	}
 	if mobile.UTMChannel != "google" {
-		t.Fatalf("utm = %q, want the first writer's channel", mobile.UTMChannel)
+		t.Fatalf("utm = %q, want the channel on the earliest event", mobile.UTMChannel)
 	}
 	if mobile.EarliestTime != "2023-01-01 10:00:00" || mobile.LatestTime != "2023-01-01 12:00:00" {
 		t.Fatalf("window = %s .. %s", mobile.EarliestTime, mobile.LatestTime)
@@ -531,8 +550,8 @@ func TestConcurrentUpsertAndLoad(t *testing.T) {
 	if user.UserID != "user-even" {
 		t.Fatalf("user id = %q", user.UserID)
 	}
-	if user.UTMChannel != "google" && user.UTMChannel != "facebook" {
-		t.Fatalf("utm = %q", user.UTMChannel)
+	if user.UTMChannel != "google" {
+		t.Fatalf("utm = %q, want google from the earliest timestamp", user.UTMChannel)
 	}
 	if user.EarliestTime != "2023-01-01 12:00:00" || user.LatestTime != "2023-01-01 12:59:00" {
 		t.Fatalf("window = %s .. %s", user.EarliestTime, user.LatestTime)
@@ -575,75 +594,25 @@ func TestConcurrentSampleLoad(t *testing.T) {
 
 func assertSampleMemory(t *testing.T) {
 	t.Helper()
-	if len(trackedUsers) != 8 {
-		t.Fatalf("users = %d, want 8", len(trackedUsers))
+	if len(trackedUsers) != sampleUsers {
+		t.Fatalf("users = %d, want %d", len(trackedUsers), sampleUsers)
 	}
-	if len(events) != 12 {
-		t.Fatalf("events = %d, want 12", len(events))
+	if len(events) != sampleEvents {
+		t.Fatalf("events = %d, want %d", len(events), sampleEvents)
 	}
-
-	stable := []struct {
-		session  string
-		device   string
-		userID   string
-		channel  string
-		earliest string
-		latest   string
-	}{
-		{"sess-001", "mobile", "", "google", "2023-01-01 12:00:00", "2023-01-01 12:05:00"},
-		{"sess-002", "desktop", "", "google", "2023-01-01 13:00:00", "2023-01-01 13:00:00"},
-		{"sess-003", "tablet", "user-ghi", "google", "2023-01-02 09:00:00", "2023-01-02 09:00:00"},
-		{"sess-004", "mobile", "user-abc", "google", "2023-01-02 10:30:00", "2023-01-02 10:30:00"},
-		{"sess-005", "mobile", "user-abc", "facebook", "2023-01-01 14:00:00", "2023-01-01 15:00:00"},
-		{"sess-007", "tablet", "user-ghi", "facebook", "2023-01-02 10:00:00", "2023-01-02 11:00:00"},
-		{"sess-008", "mobile", "user-abc", "facebook", "2023-01-02 11:00:00", "2023-01-02 11:00:00"},
-	}
-	for _, tt := range stable {
-		user := trackedUsers[generateTrackingHash(tt.session, tt.device)]
-		if user == nil {
-			t.Fatalf("missing %s", tt.session)
-		}
-		if user.UserID != tt.userID || user.UTMChannel != tt.channel || user.Attributes != "{}" ||
-			user.EarliestTime != tt.earliest || user.LatestTime != tt.latest {
-			t.Fatalf("%s = %+v", tt.session, user)
-		}
-	}
-
-	// sess-006 is touched by Facebook Ads (utm facebook) and the site file (utm google).
-	// The first writer keeps the channel. Times and user_id do not depend on that race.
-	shared := trackedUsers[generateTrackingHash("sess-006", "desktop")]
-	if shared == nil {
-		t.Fatal("missing sess-006")
-	}
-	if shared.UserID != "user-def" || shared.Attributes != "{}" ||
-		shared.EarliestTime != "2023-01-01 14:30:00" || shared.LatestTime != "2023-01-01 16:00:00" {
-		t.Fatalf("sess-006 = %+v", shared)
-	}
-	if shared.UTMChannel != "google" && shared.UTMChannel != "facebook" {
-		t.Fatalf("sess-006 utm = %q", shared.UTMChannel)
-	}
-
-	var cost, revenue float64
-	var clicks, views, conversions, websiteEmpty int
+	var revenue float64
+	var conversions, websiteEmpty int
 	for _, event := range events {
-		cost += event.Cost
 		revenue += event.Revenue
-		switch event.EventType {
-		case "click":
-			clicks++
-		case "view":
-			views++
-		case "conversion":
+		if event.EventType == "conversion" {
 			conversions++
 		}
 		if event.Source == "Website" && event.Metadata == "{}" {
 			websiteEmpty++
 		}
 	}
-	nearly(t, cost, 5.55)
-	nearly(t, revenue, 0)
-	if clicks != 8 || views != 1 || conversions != 3 || websiteEmpty != 4 {
-		t.Fatalf("clicks=%d views=%d conversions=%d websiteEmpty=%d", clicks, views, conversions, websiteEmpty)
+	if revenue <= 0 || conversions == 0 || websiteEmpty != 0 {
+		t.Fatalf("revenue=%v conversions=%d emptyMeta=%d", revenue, conversions, websiteEmpty)
 	}
 }
 
@@ -662,11 +631,11 @@ func assertSampleDatabase(t *testing.T, path string) {
 	if err := db.QueryRow(`select count(*) from event where event_type = 'conversion'`).Scan(&conversions); err != nil {
 		t.Fatal(err)
 	}
-	if users != 8 || eventsCount != 12 || conversions != 3 {
+	if users != sampleUsers || eventsCount != sampleEvents || conversions != sampleConversions {
 		t.Fatalf("db users=%d events=%d conversions=%d", users, eventsCount, conversions)
 	}
-	nearly(t, cost, 5.55)
-	nearly(t, revenue, 0)
+	nearly(t, cost, sampleGoogleCost+sampleFacebookCost)
+	nearly(t, revenue, sampleRevenue)
 
 	var googleCost, facebookCost float64
 	if err := db.QueryRow(`select coalesce(sum(cost), 0) from event where source = 'Google Ads'`).Scan(&googleCost); err != nil {
@@ -675,24 +644,15 @@ func assertSampleDatabase(t *testing.T, path string) {
 	if err := db.QueryRow(`select coalesce(sum(cost), 0) from event where source = 'Facebook Ads'`).Scan(&facebookCost); err != nil {
 		t.Fatal(err)
 	}
-	nearly(t, googleCost, 2.30)
-	nearly(t, facebookCost, 3.25)
+	nearly(t, googleCost, sampleGoogleCost)
+	nearly(t, facebookCost, sampleFacebookCost)
 
 	var multi int64
 	if err := db.QueryRow(bonusSQL(t)).Scan(&multi); err != nil {
 		t.Fatal(err)
 	}
-	if multi != 0 {
+	if multi != sampleMulti {
 		t.Fatalf("multi_channel_converters = %d", multi)
-	}
-
-	var hash string
-	err := db.QueryRow(`select tracking_hash from tracked_user where session_key = 'sess-001'`).Scan(&hash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hash != generateTrackingHash("sess-001", "mobile") {
-		t.Fatalf("stored hash %s", hash)
 	}
 }
 
@@ -716,11 +676,11 @@ func TestRunPipelineSampleMatchesBonusSQL(t *testing.T) {
 
 	first := runPipeline(google, facebook, site)
 	second := runPipeline(google, facebook, site)
-	if len(second.Users) != 8 || len(second.Events) != 12 {
-		t.Fatalf("second run users=%d events=%d, want a fresh load", len(second.Users), len(second.Events))
+	if len(second.Users) != sampleUsers || len(second.Events) != sampleEvents {
+		t.Fatalf("second run users=%d events=%d", len(second.Users), len(second.Events))
 	}
-	if len(first.Users) != len(second.Users) || len(first.Events) != len(second.Events) {
-		t.Fatal("sample shape changed between runs")
+	if channelSignature(first) != channelSignature(second) {
+		t.Fatal("utm_channel changed between two runs of the same CSVs")
 	}
 	assertRunSample(t, second)
 	if got := bonusOnSnapshot(t, second); got != int64(second.Summary.MultiChannelConverters) {
@@ -791,9 +751,12 @@ func TestRunPipelineRecoversShortAdRow(t *testing.T) {
 	if len(got.Users) != 0 || len(got.Events) != 0 {
 		t.Fatalf("short row produced users=%d events=%d", len(got.Users), len(got.Events))
 	}
+	if got.Summary.SkippedRows < 1 {
+		t.Fatalf("skipped = %d logs=%#v", got.Summary.SkippedRows, got.Logs)
+	}
 	found := false
 	for _, line := range got.Logs {
-		if strings.Contains(line, "panic en google_clicks.csv") {
+		if strings.Contains(line, "columnas insuficientes") {
 			found = true
 		}
 	}
@@ -802,40 +765,107 @@ func TestRunPipelineRecoversShortAdRow(t *testing.T) {
 	}
 }
 
+func TestShortAdRowKeepsTheRestOfTheFile(t *testing.T) {
+	body := strings.Join([]string{
+		"timestamp,user_id,session_key,device_type,campaign,ad_group,cost,utm_channel,gclid",
+		"2023-01-01 12:00:00,user-1,sess-short,mobile",
+		"2023-01-01 13:00:00,user-2,sess-ok,desktop,Camp,Group,0.40,google,G1",
+		"",
+	}, "\n")
+	path := writeRaw(t, "google.csv", body)
+	runProcessor(t, processGoogleClicks, path)
+	if len(events) != 1 || len(trackedUsers) != 1 {
+		t.Fatalf("users=%d events=%d", len(trackedUsers), len(events))
+	}
+	if skippedCount() != 1 {
+		t.Fatalf("skipped = %d", skippedCount())
+	}
+	if events[0].Campaign != "Camp" || events[0].Cost != 0.40 {
+		t.Fatalf("event = %+v", events[0])
+	}
+}
+
+func TestChannelFollowsEarliestEvent(t *testing.T) {
+	hash := generateTrackingHash("sess-tie", "mobile")
+	orders := [][][2]string{
+		{{"2023-01-02 09:00:00", "facebook"}, {"2023-01-01 09:00:00", "google"}},
+		{{"2023-01-01 09:00:00", "google"}, {"2023-01-02 09:00:00", "facebook"}},
+	}
+	for _, order := range orders {
+		resetPipeline()
+		for _, row := range order {
+			upsertTrackedUser(hash, "user-1", "sess-tie", row[1], row[0])
+		}
+		user := trackedUsers[hash]
+		if user.UTMChannel != "google" || user.EarliestTime != "2023-01-01 09:00:00" {
+			t.Fatalf("order %v user %+v", order, user)
+		}
+	}
+	for _, first := range []string{"google", "facebook"} {
+		second := "facebook"
+		if first == "facebook" {
+			second = "google"
+		}
+		resetPipeline()
+		upsertTrackedUser(hash, "", "sess-tie", first, "2023-01-01 09:00:00")
+		upsertTrackedUser(hash, "", "sess-tie", second, "2023-01-01 09:00:00")
+		if trackedUsers[hash].UTMChannel != "facebook" {
+			t.Fatalf("tie started with %s kept %s", first, trackedUsers[hash].UTMChannel)
+		}
+	}
+}
+
+func channelSignature(got PipelineResult) string {
+	parts := make([]string, 0, len(got.Users))
+	for _, user := range got.Users {
+		parts = append(parts, user.SessionKey+"|"+user.TrackingHash+"|"+user.UTMChannel+"|"+user.EarliestTime)
+	}
+	sortStrings(parts)
+	return strings.Join(parts, "\n")
+}
+
+func sortStrings(values []string) {
+	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+}
+
 func assertRunSample(t *testing.T, got PipelineResult) {
 	t.Helper()
 	s := got.Summary
-	if s.Users != 8 || s.Events != 12 || s.Clicks != 8 || s.Views != 1 || s.Conversions != 3 {
+	if s.Users != sampleUsers || s.Events != sampleEvents || s.Clicks != sampleClicks || s.Views != sampleViews || s.Conversions != sampleConversions {
 		t.Fatalf("summary = %+v", s)
 	}
-	if s.GoogleClicks != 4 || s.FacebookClicks != 4 || s.WebsiteEvents != 4 {
+	if s.GoogleClicks != sampleGoogleClicks || s.FacebookClicks != sampleFacebookClicks || s.WebsiteEvents != sampleWebsiteEvents {
 		t.Fatalf("sources = %+v", s)
 	}
-	nearly(t, s.GoogleCost, 2.30)
-	nearly(t, s.FacebookCost, 3.25)
-	nearly(t, s.WebsiteCost, 0)
-	nearly(t, s.Revenue, 0)
-	if s.EmptyWebsiteMetadata != 4 || s.EmptyUserIDs != 2 || s.MultiChannelConverters != 0 {
-		t.Fatalf("summary = %+v", s)
+	nearly(t, s.GoogleCost, sampleGoogleCost)
+	nearly(t, s.FacebookCost, sampleFacebookCost)
+	nearly(t, s.Revenue, sampleRevenue)
+	if s.MultiChannelConverters != sampleMulti || len(s.Days) != sampleDays {
+		t.Fatalf("multi=%d days=%d", s.MultiChannelConverters, len(s.Days))
 	}
-	if len(got.Logs) != 0 {
-		t.Fatalf("logs = %#v", got.Logs)
+	if s.Days[0].Day != "2024-03-04" || s.Days[len(s.Days)-1].Day != "2024-03-29" {
+		t.Fatalf("day span %s .. %s", s.Days[0].Day, s.Days[len(s.Days)-1].Day)
 	}
-	if len(s.Sess006) != 1 {
-		t.Fatalf("sess-006 = %+v", s.Sess006)
+	if s.EmptyWebsiteMetadata != 0 || s.SkippedRows != 0 || len(got.Logs) != 0 {
+		t.Fatalf("emptyMeta=%d skipped=%d logs=%#v", s.EmptyWebsiteMetadata, s.SkippedRows, got.Logs)
 	}
-	if s.Sess006[0].UTMChannel != "google" && s.Sess006[0].UTMChannel != "facebook" {
-		t.Fatalf("sess-006 channel = %q", s.Sess006[0].UTMChannel)
+	if len(s.Days) < 21 {
+		t.Fatalf("days = %d", len(s.Days))
 	}
-	var sess001 *PipelineUser
-	for i := range got.Users {
-		if got.Users[i].SessionKey == "sess-001" {
-			sess001 = &got.Users[i]
-			break
-		}
+	var dayCost, dayRevenue float64
+	var dayConv int
+	for _, day := range s.Days {
+		dayCost += day.Cost
+		dayRevenue += day.Revenue
+		dayConv += day.Conversions
 	}
-	if sess001 == nil || sess001.TrackingHash != generateTrackingHash("sess-001", "mobile") {
-		t.Fatalf("sess-001 = %+v", sess001)
+	nearly(t, dayCost, s.GoogleCost+s.FacebookCost+s.WebsiteCost)
+	nearly(t, dayRevenue, s.Revenue)
+	if dayConv != s.Conversions {
+		t.Fatalf("day conversions %d summary %d", dayConv, s.Conversions)
+	}
+	if s.EmptyUserIDs != 0 {
+		t.Fatalf("empty user ids = %d", s.EmptyUserIDs)
 	}
 	ids := map[int64]bool{}
 	for _, user := range got.Users {

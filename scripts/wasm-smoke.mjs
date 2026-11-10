@@ -40,19 +40,23 @@ for (let i = 0; i < 20; i++) {
   last = JSON.parse(globalThis.runMarketingETL(google, facebook, site));
   assert(!last.error, last.error || "etl error");
   const summary = last.summary;
-  assert(summary.users === 8, `users ${summary.users}`);
-  assert(summary.events === 12, `events ${summary.events}`);
-  assert(summary.clicks === 8 && summary.views === 1 && summary.conversions === 3, "event types");
-  assert(summary.google_clicks === 4 && summary.facebook_clicks === 4 && summary.website_events === 4, "sources");
-  nearly(summary.google_cost, 2.3);
-  nearly(summary.facebook_cost, 3.25);
-  nearly(summary.revenue, 0);
-  assert(summary.multi_channel_converters === 0, "go multi");
-  assert(summary.empty_website_metadata === 4 && summary.empty_user_ids === 2, "empty fields");
+  assert(summary.users === 636, `users ${summary.users}`);
+  assert(summary.events === 3311, `events ${summary.events}`);
+  assert(summary.clicks === 907 && summary.views === 2191 && summary.conversions === 52, "event types");
+  assert(summary.google_clicks === 537 && summary.facebook_clicks === 370 && summary.website_events === 2404, "sources");
+  nearly(summary.google_cost, 474.7);
+  nearly(summary.facebook_cost, 286.21);
+  nearly(summary.revenue, 2463.3);
+  assert(summary.multi_channel_converters === 17, "go multi");
+  assert(summary.empty_website_metadata === 0 && summary.empty_user_ids === 0, "empty fields");
+  assert(summary.skipped_rows === 0, "skipped");
+  assert(summary.days.length === 26, `days ${summary.days.length}`);
   assert(Array.isArray(last.logs) && last.logs.length === 0, "unexpected logs");
-  assert(summary.sess006.length === 1, "sess-006");
-  const channel = summary.sess006[0].utm_channel;
-  channels.set(channel, (channels.get(channel) || 0) + 1);
+  const signature = last.users
+    .map((user) => `${user.session_key}|${user.utm_channel}|${user.earliest_time}`)
+    .sort()
+    .join("\n");
+  channels.set(signature, (channels.get(signature) || 0) + 1);
 }
 
 const initSqlJs = require(path.join(root, "site/vendor/sql-wasm.js"));
@@ -118,14 +122,8 @@ insertEvent.free();
 const bonus = db.exec(bonusSQL);
 assert(bonus.length === 1, `bonus result sets ${bonus.length}`);
 assert(bonus[0].columns[0] === "multi_channel_converters", bonus[0].columns.join(","));
-assert(bonus[0].values[0][0] === 0, `sql multi ${bonus[0].values[0][0]}`);
-const sess = last.users.find((user) => user.session_key === "sess-001");
-assert(sess, "missing sess-001");
-assert(
-  sess.tracking_hash === "8febfb777a3edd7d2fb20f27b692082915412bea685c7187c6c8bc911822717a",
-  sess.tracking_hash,
-);
+assert(bonus[0].values[0][0] === 17, `sql multi ${bonus[0].values[0][0]}`);
+assert(channels.size === 1, `channel signatures ${channels.size}`);
 
-const dist = [...channels.entries()].map(([name, n]) => `${name}=${n}`).join(", ");
-console.log(`wasm smoke ok. 20 runs, sess-006 utm_channel: ${dist}`);
+console.log("wasm smoke ok. 20 runs, one channel signature, multi_channel_converters=17");
 process.exit(0);

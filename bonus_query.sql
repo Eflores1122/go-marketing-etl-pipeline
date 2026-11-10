@@ -16,7 +16,7 @@ WHERE EXISTS (
       AND e_f.event_time < e_conv.event_time
 );
 
-/* Resultado:
+/* Resultado sobre los CSV de Taller Norte generados con seed 20260311:
 multi_channel_converters
-0
+17
 */

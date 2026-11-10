@@ -2,7 +2,7 @@
 
 Sitio con el pipeline en el navegador: https://eflores1122.github.io/go-marketing-etl-pipeline/
 
-This repository is a portfolio project built on small sample CSV files. It reads click exports from Google Ads and Facebook Ads plus a website event log, deduplicates visitors in memory, and loads two SQLite tables. A SQL file counts multi-channel converters. An Airbyte setup is described below as a proposal only; this program does not call Airbyte.
+This repository is a portfolio project. The checked-in CSVs are a synthetic extract for Taller Norte, a fictional home-and-clothing shop, written by `scripts/generate_retail.py` with seed `20260311`. The program reads those Google Ads and Facebook Ads clicks plus the website event log, deduplicates visitors in memory, and loads two SQLite tables. A SQL file counts multi-channel converters. An Airbyte setup is described below as a proposal only; this program does not call Airbyte.
 
 Run it from the repository root. The database file `marketing_data.db` is created on load and is gitignored.
 
@@ -22,7 +22,7 @@ The job is to produce:
 - `event`: one row per click or site action, pointing at that user
 - `bonus_query.sql`: how many tracked users converted after both a Google Ads click and a Facebook Ads click
 
-Rows with a timestamp the parser rejects, or with an empty `device_type`, are skipped and a log line is written. A website row with fewer than seven fields is skipped the same way.
+Rows with a timestamp the parser rejects, an empty `device_type`, or too few columns are skipped and counted. A website row needs seven fields. A Google or Facebook row needs nine, because the loader reads indexes 0 through 8. One short ad row no longer aborts the process or drops the rest of the file.
 
 ## Architecture
 
@@ -90,12 +90,11 @@ sequenceDiagram
 
 Merge rules inside the write lock:
 
-- A new hash inserts a user. `utm_channel` and the initial `user_id` come from that first row.
+- A new hash inserts a user. `utm_channel` and the initial `user_id` come from that row.
 - A later row fills `user_id` only when the stored value is still empty. A non-empty `user_id` is left as-is.
-- Later rows do not change `utm_channel`, `session_key`, `tracking_hash`, or `attributes`.
+- `utm_channel` is replaced when the new row has an earlier timestamp. If the timestamps are equal, the channel that sorts first is kept. Arrival order does not matter, so a native run and a wasm run agree.
+- Later rows do not change `session_key`, `tracking_hash`, or `attributes`.
 - `earliest_time` and `latest_time` expand to include the row timestamp. The comparison is lexicographic on `YYYY-MM-DD HH:MM:SS`, which matches chronological order for values this parser accepts.
-
-Because `utm_channel` is first-writer-wins, a session that appears in more than one file can keep either file's channel. In the sample data that session is `sess-006` (a Facebook click and a website signup). See the measured runs below.
 
 ## Data model
 
@@ -109,7 +108,7 @@ Both timestamps and JSON blobs are stored as text. `attributes` is the literal `
 | `user_id` | text | Source user id, or empty string |
 | `session_key` | text | Session from the CSV |
 | `tracking_hash` | text | Hex SHA-256 described below |
-| `utm_channel` | text | Channel from the worker that created the row |
+| `utm_channel` | text | Channel on the earliest event for this hash |
 | `attributes` | text | Always `{}` |
 | `earliest_time` | text | Earliest event time for this hash |
 | `latest_time` | text | Latest event time for this hash |
@@ -135,7 +134,7 @@ Ad metadata uses the campaign column (index 4), not the ad group or ad set colum
 
 Website `action_details` is parsed as JSON. `value` is read when it is a JSON number or a numeric string. `purchase` and `signup` are stored as `event_type = conversion`. Any other action type is stored unchanged, and its `value` is not copied into `revenue`. If the details split across extra CSV fields, fields from index 5 up to but not including the last field are joined with commas, and the last field is `utm_channel`.
 
-The checked-in `site_events.csv` quotes `action_details` with backslashes. After `encoding/csv` parses those rows, the text is not valid JSON, so each website event is stored with metadata `{}` and revenue `0`. The action is still classified (`view` stays `view`; `purchase` and `signup` become `conversion`). A well-formed JSON object does populate revenue; the tests cover that path.
+The checked-in `site_events.csv` is written by the generator with the standard CSV quoting, so `action_details` is valid JSON after `encoding/csv` parses it. `purchase` rows carry `value` as a JSON number, and that number is stored in `revenue`. `signup` rows are conversions with no `value`, so their revenue stays `0`. `view` and `add_to_cart` stay their own event types. A broken JSON object still stores metadata `{}` and revenue `0`; the tests cover that path.
 
 `parseTimestamp` accepts only `2006-01-02 15:04:05`. The layout has no zone, so the clock time is treated as UTC and written back in the same shape.
 
@@ -175,7 +174,7 @@ sqlite3 marketing_data.db < bonus_query.sql
 
 GitHub Actions (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `staticcheck` v0.5.1, `go test -race -count=1 ./...`, and `scripts/wasm-smoke.mjs` on Ubuntu. The workflow has `contents: read` and no secrets.
 
-Tests are table-driven and live in `etl_pipeline_test.go`. They cover timestamp parsing, the hash (including the no-separator collision), click and website transforms, dedup merge rules, comma rejoin for site details, a missing file, creation of a new database file, append-on-second-load, concurrent upserts, and a full load of the sample CSVs. They also run `runPipeline` on the sample texts and on a crafted visitor who clicked both ad platforms before a purchase: `bonus_query.sql` against those rows returns the same count as the Go predicate (0 on the sample, 1 on the crafted visitor). A short ad row is recovered by `runPipeline` and recorded in the log; `processGoogleClicks` still panics on that shape, which is what `go run .` hits. They share package-level state, so they stay sequential. `go test -race` is how the mutexes are checked.
+Tests are table-driven and live in `etl_pipeline_test.go`. They cover timestamp parsing, the hash (including the no-separator collision), click and website transforms, dedup merge rules, comma rejoin for site details, a missing file, creation of a new database file, append-on-second-load, concurrent upserts, and a full load of the sample CSVs. They also run `runPipeline` on the Taller Norte texts and on a crafted visitor who clicked both ad platforms before a purchase: `bonus_query.sql` against those rows returns the same count as the Go predicate (17 on the sample, 1 on the crafted visitor). A short ad row is skipped and counted by `processGoogleClicks` and by `runPipeline`. Channel tests check that the earliest event wins regardless of arrival order. They share package-level state, so they stay sequential. `go test -race` is how the mutexes are checked.
 
 ## In the browser
 
@@ -192,9 +191,11 @@ bash scripts/build-site.sh
 python3 scripts/serve.py
 ```
 
-Then open http://127.0.0.1:8765/ . `scripts/wasm-smoke.mjs` runs the wasm binary 20 times on the sample CSVs and checks the totals, then runs `bonus_query.sql` in sql.js. CI does that after `go test`.
+Then open http://127.0.0.1:8765/ . The page shows cost, revenue, ROAS, and conversions for each day from that wasm run.
 
-The wasm file built with go1.22.2 on 10 November 2026 was 3123032 bytes, and 893200 bytes after gzip. Two hundred calls in that one wasm instance kept `sess-006.utm_channel` as `google` every time. The totals stayed at 8 users, 12 events, Google cost 2.30, Facebook cost 3.25, revenue 0, and `multi_channel_converters` 0. The js runtime schedules the goroutines on one thread, so the first writer can stick even though the source still lets either worker win.
+Regenerate the CSVs from the repository root with `python3 scripts/generate_retail.py`. The script is the only writer of those three files. Do not edit them by hand.
+
+`scripts/wasm-smoke.mjs` runs the wasm binary 20 times on the sample CSVs, checks the totals below, checks that every run keeps the same `utm_channel` for each hash, and runs `bonus_query.sql` in sql.js. CI does that after `go test`.
 
 ## Airbyte proposal
 
@@ -209,55 +210,33 @@ The listed source fields do not include `session_key` or `device_type`, which ar
 
 ## Measured run
 
-Numbers below are from this program, executed on 30 October 2026 from the repository root. `marketing_data.db` was deleted before every run. The binary was `go build` of this module.
+Numbers below are from `runPipeline` on the Taller Norte CSVs generated with seed `20260311`, measured on 10 November 2026. The same totals are what `go test` and `scripts/wasm-smoke.mjs` require. Twenty wasm calls in one process kept one channel signature.
 
-Twenty runs agreed on every total. Each run printed `ETL completado y datos cargados en marketing_data.db`.
+The generator wrote 460 shoppers and 636 sessions. The pipeline stores one user per session and device, so the user count is 636. Website actions in the file are 2191 `view`, 161 `add_to_cart`, 31 `purchase`, and 21 `signup`. Purchases and signups are stored as `conversion`, which is why the conversion count is 52. Revenue is the sum of purchase `value` only. Signup rows have no `value`.
 
-| Measure | Value in all 20 runs |
+| Measure | Value |
 | --- | --- |
-| `tracked_user` rows | 8 |
-| `event` rows | 12 |
-| Clicks / views / conversions | 8 / 1 / 3 |
-| Google Ads clicks, total cost | 4, 2.30 |
-| Facebook Ads clicks, total cost | 4, 3.25 |
-| Website events, total cost, total revenue | 4, 0.00, 0.00 |
-| Website events whose metadata is `{}` | 4 |
-| Users with an empty `user_id` | 2 |
-| `bonus_query.sql` `multi_channel_converters` | 0 |
+| `tracked_user` rows | 636 |
+| `event` rows | 3311 |
+| Clicks / views / conversions | 907 / 2191 / 52 |
+| Google Ads clicks, total cost | 537, 474.70 |
+| Facebook Ads clicks, total cost | 370, 286.21 |
+| Website events, total revenue | 2404, 2463.30 |
+| Total cost | 760.91 |
+| ROAS, revenue / cost | 3.24 |
+| Days with events | 26, from 2024-03-04 through 2024-03-29 |
+| Website events whose metadata is `{}` | 0 |
+| Users with an empty `user_id` | 0 |
+| `bonus_query.sql` `multi_channel_converters` | 17 |
 
-The user rows below are from the last of those 20 runs. The counter for the series stored the totals in the table above, not a full dump of every run.
-
-| session_key | user_id | utm_channel | earliest_time | latest_time |
-| --- | --- | --- | --- | --- |
-| sess-001 | (empty) | google | 2023-01-01 12:00:00 | 2023-01-01 12:05:00 |
-| sess-002 | (empty) | google | 2023-01-01 13:00:00 | 2023-01-01 13:00:00 |
-| sess-003 | user-ghi | google | 2023-01-02 09:00:00 | 2023-01-02 09:00:00 |
-| sess-004 | user-abc | google | 2023-01-02 10:30:00 | 2023-01-02 10:30:00 |
-| sess-005 | user-abc | facebook | 2023-01-01 14:00:00 | 2023-01-01 15:00:00 |
-| sess-006 | user-def | google | 2023-01-01 14:30:00 | 2023-01-01 16:00:00 |
-| sess-007 | user-ghi | facebook | 2023-01-02 10:00:00 | 2023-01-02 11:00:00 |
-| sess-008 | user-abc | facebook | 2023-01-02 11:00:00 | 2023-01-02 11:00:00 |
-
-In that run `sess-006` kept `google`, which is the channel on the website row for that session. A further 100 runs of the same binary recorded only `sess-006.utm_channel`: `google` 95 times and `facebook` 5 times. Twenty runs of the program before the readability cleanup produced the same aggregate totals; in that series the same channel was `google` 18 times and `facebook` 2 times.
-
-On 10 November 2026, after the wasm split, 40 runs of the native binary on the same sample recorded only that channel: `google` 39 times and `facebook` once. That loop did not re-sum costs. The tests still require the totals in the table above.
-
-From the same 20th-run database, Facebook metadata looked like `{"ad_set":"FB Campaign X","fbclid":"FBCLID123"}` with campaign `FB Campaign X` and cost `1.0`. All four website rows had revenue `0.0` and metadata `{}`.
-
-Example hash for `sess-001` / `mobile`:
-
-```text
-8febfb777a3edd7d2fb20f27b692082915412bea685c7187c6c8bc911822717a
-```
+ROAS is `2463.30 / 760.91`. The page prints that quotient with two decimal places. Click cost averages about 0.84 and 31 of 907 clicks are followed by a purchase in the generator, so the ratio is the arithmetic of this file, not an industry benchmark.
 
 ## Behavior worth knowing
 
 - Ad-click metadata stores the campaign name under `ad_group` or `ad_set`. The ad group and ad set columns are not read.
-- Sample website revenue is 0 because those `action_details` values do not parse as JSON.
-- A second run appends duplicate users and events.
-- `utm_channel` depends on which worker inserts the hash first.
+- A second run appends duplicate users and events. A browser run starts from an empty database.
+- `utm_channel` follows the earliest event, then the channel name. It does not follow whichever goroutine took the lock first.
 - The tracking hash has no delimiter, so different session/device pairs can collide.
-- A Google or Facebook row with too few columns panics on index. Website rows shorter than seven fields are skipped.
-- User ids are not merged across sessions, so the bonus query's result on this sample is 0.
-- Log lines for skipped rows and I/O failures are in Spanish, matching the strings the program already printed. The success line is `ETL completado y datos cargados en marketing_data.db`.
-- `runPipeline` (the browser entry) records a short ad-row panic in its log and returns. `go run .` still aborts on that row, because `processGoogleClicks` does not recover.
+- A Google or Facebook row with fewer than nine columns is skipped and counted. Website rows shorter than seven fields are skipped the same way.
+- User ids are not merged across sessions. On this sample, 17 tracked users still have both ad clicks before a conversion, because those clicks share one session and device.
+- Log lines for skipped rows and I/O failures are in Spanish. The success line is `ETL completado y datos cargados en marketing_data.db`.

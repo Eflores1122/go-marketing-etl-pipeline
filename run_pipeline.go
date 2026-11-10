@@ -34,11 +34,22 @@ type PipelineEvent struct {
 	Metadata      string  `json:"metadata"`
 }
 
-// SessionChannel is the utm_channel kept for one hash of sess-006.
+// SessionChannel is the utm_channel kept for one hash of a named session.
 type SessionChannel struct {
 	SessionKey   string `json:"session_key"`
 	TrackingHash string `json:"tracking_hash"`
 	UTMChannel   string `json:"utm_channel"`
+}
+
+// DailyMetric is one calendar day of the in-memory events.
+// Day is the YYYY-MM-DD prefix of event_time. ROAS is revenue/cost and is
+// left to the caller so a day with no cost is not stored as a fake ratio.
+type DailyMetric struct {
+	Day         string  `json:"day"`
+	Cost        float64 `json:"cost"`
+	Revenue     float64 `json:"revenue"`
+	Conversions int     `json:"conversions"`
+	Clicks      int     `json:"clicks"`
 }
 
 // PipelineSummary holds counts derived from the in-memory rows.
@@ -59,7 +70,9 @@ type PipelineSummary struct {
 	EmptyWebsiteMetadata   int              `json:"empty_website_metadata"`
 	EmptyUserIDs           int              `json:"empty_user_ids"`
 	MultiChannelConverters int              `json:"multi_channel_converters"`
+	SkippedRows            int              `json:"skipped_rows"`
 	Sess006                []SessionChannel `json:"sess006"`
+	Days                   []DailyMetric    `json:"days"`
 }
 
 // PipelineResult is what the browser receives from runMarketingETL.
@@ -105,6 +118,7 @@ func resetRunState() {
 	logMu.Lock()
 	logLines = nil
 	logMu.Unlock()
+	resetSkipped()
 	wg = sync.WaitGroup{}
 }
 
@@ -217,7 +231,38 @@ func summarize(users []PipelineUser, evs []PipelineEvent) PipelineSummary {
 		}
 	}
 	summary.MultiChannelConverters = multiChannelConverters(users, evs)
+	summary.SkippedRows = skippedCount()
+	summary.Days = dailyMetrics(evs)
 	return summary
+}
+
+func dailyMetrics(evs []PipelineEvent) []DailyMetric {
+	byDay := map[string]*DailyMetric{}
+	for _, event := range evs {
+		if len(event.EventTime) < 10 {
+			continue
+		}
+		day := event.EventTime[:10]
+		row := byDay[day]
+		if row == nil {
+			row = &DailyMetric{Day: day}
+			byDay[day] = row
+		}
+		row.Cost += event.Cost
+		row.Revenue += event.Revenue
+		if event.EventType == "conversion" {
+			row.Conversions++
+		}
+		if event.EventType == "click" {
+			row.Clicks++
+		}
+	}
+	days := make([]DailyMetric, 0, len(byDay))
+	for _, row := range byDay {
+		days = append(days, *row)
+	}
+	sort.Slice(days, func(i, j int) bool { return days[i].Day < days[j].Day })
+	return days
 }
 
 // multiChannelConverters counts distinct users who have a conversion strictly
