@@ -1,5 +1,7 @@
 # Marketing ETL pipeline in Go
 
+Sitio con el pipeline en el navegador: https://eflores1122.github.io/go-marketing-etl-pipeline/
+
 This repository is a portfolio project built on small sample CSV files. It reads click exports from Google Ads and Facebook Ads plus a website event log, deduplicates visitors in memory, and loads two SQLite tables. A SQL file counts multi-channel converters. An Airbyte setup is described below as a proposal only; this program does not call Airbyte.
 
 Run it from the repository root. The database file `marketing_data.db` is created on load and is gitignored.
@@ -55,7 +57,7 @@ flowchart LR
   ev --> db
 ```
 
-`main` starts the three workers, waits for them, then calls `loadToDatabase("./marketing_data.db")`. That function creates the SQLite file when it is missing, runs `CREATE TABLE IF NOT EXISTS` for both tables, and inserts the in-memory rows in one transaction. The database file is not committed.
+`main` starts the three workers, waits for them, then calls `loadToDatabase("./marketing_data.db")`. The `js`/`wasm` build does not call `loadToDatabase`. See [In the browser](#in-the-browser). That function creates the SQLite file when it is missing, runs `CREATE TABLE IF NOT EXISTS` for both tables, and inserts the in-memory rows in one transaction. The database file is not committed.
 
 The load inserts users first and keeps `tracking_hash -> tracked_user_id` for the event insert. An event whose hash was not inserted is skipped. Running the program again appends another full copy; the load does not delete or update existing rows, and there is no unique index on `tracking_hash`.
 
@@ -171,9 +173,28 @@ Inspect the file with any SQLite client:
 sqlite3 marketing_data.db < bonus_query.sql
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `staticcheck` v0.5.1, and `go test -race -count=1 ./...` on Ubuntu. The workflow has `contents: read` and no secrets.
+GitHub Actions (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `staticcheck` v0.5.1, `go test -race -count=1 ./...`, and `scripts/wasm-smoke.mjs` on Ubuntu. The workflow has `contents: read` and no secrets.
 
-Tests are table-driven and live in `etl_pipeline_test.go`. They cover timestamp parsing, the hash (including the no-separator collision), click and website transforms, dedup merge rules, comma rejoin for site details, a missing file, creation of a new database file, append-on-second-load, concurrent upserts, and a full load of the sample CSVs. They share package-level state, so they stay sequential. `go test -race` is how the mutexes are checked.
+Tests are table-driven and live in `etl_pipeline_test.go`. They cover timestamp parsing, the hash (including the no-separator collision), click and website transforms, dedup merge rules, comma rejoin for site details, a missing file, creation of a new database file, append-on-second-load, concurrent upserts, and a full load of the sample CSVs. They also run `runPipeline` on the sample texts and on a crafted visitor who clicked both ad platforms before a purchase: `bonus_query.sql` against those rows returns the same count as the Go predicate (0 on the sample, 1 on the crafted visitor). A short ad row is recovered by `runPipeline` and recorded in the log; `processGoogleClicks` still panics on that shape, which is what `go run .` hits. They share package-level state, so they stay sequential. `go test -race` is how the mutexes are checked.
+
+## In the browser
+
+GitHub Pages serves the `site/` directory. `.github/workflows/pages.yml` runs the tests, builds `site/etl.wasm` with `GOOS=js GOARCH=wasm`, and deploys the directory with `actions/upload-pages-artifact` and `actions/deploy-pages` on a push to `main` or a manual run. Pages needs `pages: write` and `id-token: write`. The owner already set the Pages source to GitHub Actions.
+
+`modernc.org/sqlite` v1.34.5 does not compile for that target. Building the native program with `GOOS=js GOARCH=wasm` fails because `modernc.org/libc` v1.55.3 has no `GOOS=js` files for `errno`, `pthread`, `signal`, `stdio`, `sys/types`, `time`, and `unistd`. The browser binary leaves `loadToDatabase` out. It exports `runMarketingETL`, which runs the same three ingest workers on CSV text and returns JSON rows. User ids are assigned by ranging the map, the same rule as the SQLite insert on an empty file, so the ids are not stable across processes.
+
+The page inserts those rows into [sql.js](https://github.com/sql-js/sql.js) 1.11.0, SQLite compiled to WebAssembly, and executes `bonus_query.sql` unchanged, comment included. Editable queries on the same tables are extra SQL in the page, not files in this repository. A browser run always starts from an empty database. It does not append, which a second `go run .` does.
+
+TinyGo is not required. The standard Go 1.22.2 toolchain produces the browser binary. Any build that imports `modernc.org/libc` hits the same missing `GOOS=js` files.
+
+```bash
+bash scripts/build-site.sh
+python3 scripts/serve.py
+```
+
+Then open http://127.0.0.1:8765/ . `scripts/wasm-smoke.mjs` runs the wasm binary 20 times on the sample CSVs and checks the totals, then runs `bonus_query.sql` in sql.js. CI does that after `go test`.
+
+The wasm file built with go1.22.2 on 10 November 2026 was 3123032 bytes, and 893200 bytes after gzip. Two hundred calls in that one wasm instance kept `sess-006.utm_channel` as `google` every time. The totals stayed at 8 users, 12 events, Google cost 2.30, Facebook cost 3.25, revenue 0, and `multi_channel_converters` 0. The js runtime schedules the goroutines on one thread, so the first writer can stick even though the source still lets either worker win.
 
 ## Airbyte proposal
 
@@ -219,6 +240,8 @@ The user rows below are from the last of those 20 runs. The counter for the seri
 
 In that run `sess-006` kept `google`, which is the channel on the website row for that session. A further 100 runs of the same binary recorded only `sess-006.utm_channel`: `google` 95 times and `facebook` 5 times. Twenty runs of the program before the readability cleanup produced the same aggregate totals; in that series the same channel was `google` 18 times and `facebook` 2 times.
 
+On 10 November 2026, after the wasm split, 40 runs of the native binary on the same sample recorded only that channel: `google` 39 times and `facebook` once. That loop did not re-sum costs. The tests still require the totals in the table above.
+
 From the same 20th-run database, Facebook metadata looked like `{"ad_set":"FB Campaign X","fbclid":"FBCLID123"}` with campaign `FB Campaign X` and cost `1.0`. All four website rows had revenue `0.0` and metadata `{}`.
 
 Example hash for `sess-001` / `mobile`:
@@ -237,3 +260,4 @@ Example hash for `sess-001` / `mobile`:
 - A Google or Facebook row with too few columns panics on index. Website rows shorter than seven fields are skipped.
 - User ids are not merged across sessions, so the bonus query's result on this sample is 0.
 - Log lines for skipped rows and I/O failures are in Spanish, matching the strings the program already printed. The success line is `ETL completado y datos cargados en marketing_data.db`.
+- `runPipeline` (the browser entry) records a short ad-row panic in its log and returns. `go run .` still aborts on that row, because `processGoogleClicks` does not recover.

@@ -709,6 +709,237 @@ func bonusSQL(t *testing.T) string {
 	return sqlText
 }
 
+func TestRunPipelineSampleMatchesBonusSQL(t *testing.T) {
+	google := readRepoFile(t, "google_clicks.csv")
+	facebook := readRepoFile(t, "facebook_clicks.csv")
+	site := readRepoFile(t, "site_events.csv")
+
+	first := runPipeline(google, facebook, site)
+	second := runPipeline(google, facebook, site)
+	if len(second.Users) != 8 || len(second.Events) != 12 {
+		t.Fatalf("second run users=%d events=%d, want a fresh load", len(second.Users), len(second.Events))
+	}
+	if len(first.Users) != len(second.Users) || len(first.Events) != len(second.Events) {
+		t.Fatal("sample shape changed between runs")
+	}
+	assertRunSample(t, second)
+	if got := bonusOnSnapshot(t, second); got != int64(second.Summary.MultiChannelConverters) {
+		t.Fatalf("sql multi=%d go multi=%d", got, second.Summary.MultiChannelConverters)
+	}
+}
+
+func TestRunPipelineMultiChannelPredicate(t *testing.T) {
+	googleHeader := []string{"timestamp", "user_id", "session_key", "device_type", "campaign", "ad_group", "cost", "utm_channel", "gclid"}
+	facebookHeader := []string{"timestamp", "user_id", "session_key", "device_type", "campaign", "ad_set", "spend", "utm_channel", "fbclid"}
+	siteHeader := []string{"timestamp", "user_id", "session_key", "device_type", "action_type", "action_details", "utm_channel"}
+
+	bothBefore := runPipeline(
+		csvText(t, [][]string{
+			googleHeader,
+			{"2023-01-01 10:00:00", "user-z", "sess-z", "mobile", "Camp", "Group", "1.25", "google", "g1"},
+		}),
+		csvText(t, [][]string{
+			facebookHeader,
+			{"2023-01-01 11:00:00", "user-z", "sess-z", "mobile", "FB", "Set", "0.75", "facebook", "f1"},
+		}),
+		csvText(t, [][]string{
+			siteHeader,
+			{"2023-01-01 12:00:00", "user-z", "sess-z", "mobile", "purchase", `{"value":10}`, "google"},
+		}),
+	)
+	if bothBefore.Summary.Users != 1 || bothBefore.Summary.Events != 3 || bothBefore.Summary.Conversions != 1 {
+		t.Fatalf("summary = %+v", bothBefore.Summary)
+	}
+	nearly(t, bothBefore.Summary.Revenue, 10)
+	nearly(t, bothBefore.Summary.GoogleCost, 1.25)
+	nearly(t, bothBefore.Summary.FacebookCost, 0.75)
+	if bothBefore.Summary.MultiChannelConverters != 1 {
+		t.Fatalf("multi = %d", bothBefore.Summary.MultiChannelConverters)
+	}
+	if got := bonusOnSnapshot(t, bothBefore); got != 1 {
+		t.Fatalf("sql multi = %d", got)
+	}
+
+	facebookAfter := runPipeline(
+		csvText(t, [][]string{
+			googleHeader,
+			{"2023-01-01 10:00:00", "user-z", "sess-z", "mobile", "Camp", "Group", "1.25", "google", "g1"},
+		}),
+		csvText(t, [][]string{
+			facebookHeader,
+			{"2023-01-01 13:00:00", "user-z", "sess-z", "mobile", "FB", "Set", "0.75", "facebook", "f1"},
+		}),
+		csvText(t, [][]string{
+			siteHeader,
+			{"2023-01-01 12:00:00", "user-z", "sess-z", "mobile", "purchase", `{"value":10}`, "google"},
+		}),
+	)
+	if facebookAfter.Summary.MultiChannelConverters != 0 {
+		t.Fatalf("late facebook click counted as %d", facebookAfter.Summary.MultiChannelConverters)
+	}
+	if got := bonusOnSnapshot(t, facebookAfter); got != 0 {
+		t.Fatalf("sql multi = %d", got)
+	}
+}
+
+func TestRunPipelineRecoversShortAdRow(t *testing.T) {
+	got := runPipeline(
+		"timestamp,user_id,session_key\n2023-01-01 12:00:00,user,sess\n",
+		"timestamp,user_id,session_key,device_type,campaign,ad_set,spend,utm_channel,fbclid\n",
+		"timestamp,user_id,session_key,device_type,action_type,action_details,utm_channel\n",
+	)
+	if len(got.Users) != 0 || len(got.Events) != 0 {
+		t.Fatalf("short row produced users=%d events=%d", len(got.Users), len(got.Events))
+	}
+	found := false
+	for _, line := range got.Logs {
+		if strings.Contains(line, "panic en google_clicks.csv") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("logs = %#v", got.Logs)
+	}
+}
+
+func assertRunSample(t *testing.T, got PipelineResult) {
+	t.Helper()
+	s := got.Summary
+	if s.Users != 8 || s.Events != 12 || s.Clicks != 8 || s.Views != 1 || s.Conversions != 3 {
+		t.Fatalf("summary = %+v", s)
+	}
+	if s.GoogleClicks != 4 || s.FacebookClicks != 4 || s.WebsiteEvents != 4 {
+		t.Fatalf("sources = %+v", s)
+	}
+	nearly(t, s.GoogleCost, 2.30)
+	nearly(t, s.FacebookCost, 3.25)
+	nearly(t, s.WebsiteCost, 0)
+	nearly(t, s.Revenue, 0)
+	if s.EmptyWebsiteMetadata != 4 || s.EmptyUserIDs != 2 || s.MultiChannelConverters != 0 {
+		t.Fatalf("summary = %+v", s)
+	}
+	if len(got.Logs) != 0 {
+		t.Fatalf("logs = %#v", got.Logs)
+	}
+	if len(s.Sess006) != 1 {
+		t.Fatalf("sess-006 = %+v", s.Sess006)
+	}
+	if s.Sess006[0].UTMChannel != "google" && s.Sess006[0].UTMChannel != "facebook" {
+		t.Fatalf("sess-006 channel = %q", s.Sess006[0].UTMChannel)
+	}
+	var sess001 *PipelineUser
+	for i := range got.Users {
+		if got.Users[i].SessionKey == "sess-001" {
+			sess001 = &got.Users[i]
+			break
+		}
+	}
+	if sess001 == nil || sess001.TrackingHash != generateTrackingHash("sess-001", "mobile") {
+		t.Fatalf("sess-001 = %+v", sess001)
+	}
+	ids := map[int64]bool{}
+	for _, user := range got.Users {
+		if user.TrackedUserID == 0 || ids[user.TrackedUserID] {
+			t.Fatalf("user id %+v", user)
+		}
+		ids[user.TrackedUserID] = true
+	}
+	for _, event := range got.Events {
+		if !ids[event.TrackedUserID] {
+			t.Fatalf("event user %d missing", event.TrackedUserID)
+		}
+	}
+}
+
+func bonusOnSnapshot(t *testing.T, got PipelineResult) int64 {
+	t.Helper()
+	db := openDB(t, filepath.Join(t.TempDir(), "snapshot.db"))
+	if _, err := db.Exec(`CREATE TABLE tracked_user (
+		tracked_user_id INTEGER PRIMARY KEY,
+		user_id TEXT,
+		session_key TEXT,
+		tracking_hash TEXT,
+		utm_channel TEXT,
+		attributes TEXT,
+		earliest_time TEXT,
+		latest_time TEXT
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE event (
+		event_id INTEGER PRIMARY KEY,
+		tracked_user_id INTEGER,
+		event_time TEXT,
+		event_type TEXT,
+		source TEXT,
+		campaign TEXT,
+		cost REAL,
+		revenue REAL,
+		metadata TEXT
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	userStmt, err := db.Prepare(`INSERT INTO tracked_user (
+		tracked_user_id, user_id, session_key, tracking_hash, utm_channel, attributes, earliest_time, latest_time
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, user := range got.Users {
+		if _, err := userStmt.Exec(user.TrackedUserID, user.UserID, user.SessionKey, user.TrackingHash, user.UTMChannel, user.Attributes, user.EarliestTime, user.LatestTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = userStmt.Close()
+	eventStmt, err := db.Prepare(`INSERT INTO event (
+		event_id, tracked_user_id, event_time, event_type, source, campaign, cost, revenue, metadata
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range got.Events {
+		if _, err := eventStmt.Exec(event.EventID, event.TrackedUserID, event.EventTime, event.EventType, event.Source, event.Campaign, event.Cost, event.Revenue, event.Metadata); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = eventStmt.Close()
+	var multi int64
+	if err := db.QueryRow(bonusSQL(t)).Scan(&multi); err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err := db.QueryRow(`select coalesce(sum(cost), 0) from event`).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	nearly(t, cost, got.Summary.GoogleCost+got.Summary.FacebookCost+got.Summary.WebsiteCost)
+	return multi
+}
+
+func readRepoFile(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func csvText(t *testing.T, rows [][]string) string {
+	t.Helper()
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	for _, row := range rows {
+		if err := w.Write(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
 func openDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)

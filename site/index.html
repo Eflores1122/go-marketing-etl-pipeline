@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pipeline de marketing en el navegador</title>
+  <meta name="description" content="El ETL en Go de este repositorio, compilado a WebAssembly, une los CSV de ejemplo y ejecuta la consulta de atribución en el navegador.">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip" href="#resultado" data-i18n="skip">Saltar al resultado</a>
+  <header>
+    <div class="wrap bar">
+      <a class="wordmark" href="#top">go-marketing-etl</a>
+      <div class="lang" role="group" aria-label="Idioma">
+        <button type="button" id="lang-es" aria-pressed="true" data-lang="es">ES</button>
+        <button type="button" id="lang-en" aria-pressed="false" data-lang="en">EN</button>
+      </div>
+    </div>
+  </header>
+  <main id="top" class="wrap">
+    <h1 data-i18n="title">Pipeline de marketing en el navegador</h1>
+    <p class="lede" data-i18n="lede">Esta página ejecuta el ETL de este repositorio, compilado a WebAssembly, sobre google_clicks.csv, facebook_clicks.csv y site_events.csv. Las cifras de abajo salen de esa ejecución.</p>
+    <div class="row">
+      <button type="button" class="primary" id="run-example" data-i18n="runExample">Correr el pipeline con datos de ejemplo</button>
+    </div>
+    <p id="status" role="status" data-i18n="loading">Cargando etl.wasm y los CSV del repositorio.</p>
+
+    <h2 id="resultado" data-i18n="resultHeading">Resultado de esta ejecución</h2>
+    <div class="table-scroll" id="ledger-wrap" hidden>
+      <table id="ledger">
+        <caption data-i18n="ledgerCaption">Los totales aparecen cuando terminan etl.wasm y sql.js.</caption>
+        <thead>
+          <tr>
+            <th data-i18n="measure">Medida</th>
+            <th class="num" data-i18n="value">Valor</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <details id="aggregate">
+      <summary data-i18n="aggregateToggle">Ver la consulta de los totales</summary>
+      <pre class="source" id="aggregate-sql"></pre>
+    </details>
+
+    <h2 data-i18n="usersHeading">Usuarios unificados</h2>
+    <p class="note" id="users-note" data-i18n="usersNote">Una fila por hash. El id sigue el orden del map de Go, el mismo criterio que el INSERT nativo, y cambia entre procesos.</p>
+    <div class="table-scroll" id="users-wrap" hidden>
+      <table id="users">
+        <caption data-i18n="usersCaption">tracked_user producido por runPipeline.</caption>
+        <thead>
+          <tr>
+            <th class="num">tracked_user_id</th>
+            <th>user_id</th>
+            <th>session_key</th>
+            <th>utm_channel</th>
+            <th>earliest_time</th>
+            <th>latest_time</th>
+            <th>tracking_hash</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <h2 data-i18n="eventsHeading">Eventos</h2>
+    <p class="note" data-i18n="eventsNote">Orden de esta tabla: event_time, luego source. El slice en memoria conserva el orden en que terminaron los workers.</p>
+    <div class="table-scroll" id="events-wrap" hidden>
+      <table id="events">
+        <caption data-i18n="eventsCaption">event producido por runPipeline.</caption>
+        <thead>
+          <tr>
+            <th class="num">event_id</th>
+            <th class="num">tracked_user_id</th>
+            <th>event_time</th>
+            <th>event_type</th>
+            <th>source</th>
+            <th>campaign</th>
+            <th class="num">cost</th>
+            <th class="num">revenue</th>
+            <th>metadata</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <h2 data-i18n="costHeading">Costo por fuente</h2>
+    <figure id="cost-figure" hidden>
+      <svg id="cost-chart" role="img" aria-labelledby="cost-title cost-desc" viewBox="0 0 640 168">
+        <title id="cost-title" data-i18n="costHeading">Costo por fuente</title>
+        <desc id="cost-desc"></desc>
+      </svg>
+      <figcaption data-i18n="costNote">Eje horizontal: suma de cost. El largo de cada barra es la suma de event.cost de esa source en esta ejecución. Los CSV son sintéticos.</figcaption>
+    </figure>
+
+    <h2 data-i18n="sqlHeading">Consulta de atribución</h2>
+    <div id="narrative"></div>
+    <div class="row">
+      <label for="preset" class="note" data-i18n="presetLabel">Consulta</label>
+      <select id="preset">
+        <option value="bonus">bonus_query.sql</option>
+        <option value="totals" data-i18n-option="presetTotals">Costo e ingreso por fuente y tipo</option>
+        <option value="byUser" data-i18n-option="presetByUser">Atribución por usuario</option>
+        <option value="both" data-i18n-option="presetBoth">Usuarios con clics en las dos plataformas</option>
+      </select>
+      <button type="button" class="secondary" id="exec-sql" data-i18n="execSql">Ejecutar consulta</button>
+    </div>
+    <label for="query" class="field" data-i18n="queryLabel">SQL sobre las tablas de esta carga</label>
+    <textarea id="query" spellcheck="false"></textarea>
+    <p class="note" data-i18n="sqlHint">Ejecutar consulta corre el texto de arriba. El número de conversores del resultado de esta ejecución sigue siendo bonus_query.sql del repositorio, aunque edites este cuadro. Ctrl+Enter también ejecuta.</p>
+    <div id="sql-output"></div>
+
+    <h2 data-i18n="logsHeading">Filas omitidas</h2>
+    <div id="logs"></div>
+
+    <h2 data-i18n="lineageHeading">Linaje de columnas</h2>
+    <p class="note" data-i18n="lineageIntro">Cada fila describe lo que hace el código de este repositorio. No es un modelo de atribución distinto.</p>
+    <div class="table-scroll">
+      <table id="lineage">
+        <caption data-i18n="lineageCaption">Del CSV al campo guardado.</caption>
+        <thead>
+          <tr>
+            <th data-i18n="colColumn">Columna</th>
+            <th data-i18n="colFrom">Viene de</th>
+            <th data-i18n="colRule">Regla</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <h2 data-i18n="archHeading">Arquitectura</h2>
+    <p class="note" data-i18n="archIntro">Recorrido en el navegador. go run . llama a processGoogleClicks, processFacebookClicks y processSiteEvents, que a su vez llaman a estas mismas funciones de ingesta, y cierra con loadToDatabase sobre marketing_data.db. El diagrama nativo está en el README.</p>
+    <pre class="mermaid" id="diagram">flowchart LR
+  google[google_clicks.csv] --> ig[ingestGoogle]
+  facebook[facebook_clicks.csv] --> ifb[ingestFacebook]
+  site[site_events.csv] --> ist[ingestSite]
+  ig --> users[trackedUsers]
+  ifb --> users
+  ist --> users
+  ig --> ev[events]
+  ifb --> ev
+  ist --> ev
+  users --> snap[snapshotRows]
+  ev --> snap
+  snap --> sql[sql.js]
+  sql --> q[bonus_query.sql]</pre>
+
+    <h2 data-i18n="csvHeading">CSV de esta ejecución</h2>
+    <p class="note" data-i18n="csvIntro">El botón de arriba vuelve a leer los archivos del repositorio. Aquí puedes pegar otro texto o cargar un archivo y correr ese texto. Los CSV de ejemplo traen action_details con comillas escapadas: el JSON no parsea, metadata queda {} y revenue queda 0. Un objeto JSON válido en esa columna hace que revenue salga de value.</p>
+    <label class="field" for="csv-google">google_clicks.csv</label>
+    <textarea id="csv-google" spellcheck="false"></textarea>
+    <input id="file-google" type="file" accept=".csv,text/csv,text/plain" data-target="csv-google">
+    <label class="field" for="csv-facebook">facebook_clicks.csv</label>
+    <textarea id="csv-facebook" spellcheck="false"></textarea>
+    <input id="file-facebook" type="file" accept=".csv,text/csv,text/plain" data-target="csv-facebook">
+    <label class="field" for="csv-site">site_events.csv</label>
+    <textarea id="csv-site" spellcheck="false"></textarea>
+    <input id="file-site" type="file" accept=".csv,text/csv,text/plain" data-target="csv-site">
+    <div class="row">
+      <button type="button" class="primary" id="run-edited" data-i18n="runEdited">Correr el pipeline con este texto</button>
+      <button type="button" class="secondary" id="restore" data-i18n="restore">Restaurar los CSV del repositorio</button>
+    </div>
+
+    <h2 data-i18n="limitsHeading">Qué cambia en el navegador</h2>
+    <div class="limits">
+      <p data-i18n="limit1"></p>
+      <p data-i18n="limit2"></p>
+      <p data-i18n="limit3"></p>
+      <p data-i18n="limit4"></p>
+      <p data-i18n="limit5"></p>
+    </div>
+  </main>
+  <footer>
+    <div class="wrap">
+      <p><a href="https://github.com/Eflores1122">Eflores1122</a> · <a href="https://github.com/Eflores1122/go-marketing-etl-pipeline">go-marketing-etl-pipeline</a></p>
+      <p data-i18n="colophon"></p>
+    </div>
+  </footer>
+  <noscript>
+    <p class="wrap">Esta página necesita JavaScript para ejecutar el binario WebAssembly y sql.js.</p>
+  </noscript>
+  <script src="wasm_exec.js"></script>
+  <script src="vendor/sql-wasm.js"></script>
+  <script src="site.js"></script>
+</body>
+</html>
