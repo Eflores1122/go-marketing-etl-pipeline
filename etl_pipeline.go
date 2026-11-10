@@ -1,26 +1,22 @@
 // Command go-marketing-etl-pipeline reads three marketing CSVs, deduplicates
-// visitors in memory, and loads them into a SQLite file created at runtime.
+// visitors in memory, and, on a native build, loads them into a SQLite file.
+// The js/wasm build does not link SQLite: modernc.org/libc has no GOOS=js files.
 package main
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	_ "modernc.org/sqlite" // Pure-Go SQLite driver; no CGO.
 )
-
-// defaultDBPath is created on the first schema write when it does not exist.
-const defaultDBPath = "./marketing_data.db"
 
 // TrackedUser is one visitor after records that share a tracking hash are merged.
 type TrackedUser struct {
@@ -53,7 +49,19 @@ var (
 	eventsMutex  sync.Mutex
 	events       []Event
 	wg           sync.WaitGroup
+	logMu        sync.Mutex
+	logLines     []string
 )
+
+// pipelineLog writes the same line the CLI already printed and keeps a copy
+// for the browser result. Workers call it without holding the user or event lock.
+func pipelineLog(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	log.Print(msg)
+	logMu.Lock()
+	logLines = append(logLines, msg)
+	logMu.Unlock()
+}
 
 // generateTrackingHash is hex(SHA-256(sessionKey + deviceType)) with no separator.
 func generateTrackingHash(sessionKey, deviceType string) string {
@@ -77,17 +85,20 @@ func parseTimestamp(ts string) (string, error) {
 func readCSV(filePath string, fieldsPerRecord int) ([][]string, bool) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Printf("Error al abrir archivo %s: %v", filePath, err)
+		pipelineLog("Error al abrir archivo %s: %v", filePath, err)
 		return nil, false
 	}
 	defer file.Close()
+	return readCSVReader(file, filePath, fieldsPerRecord)
+}
 
-	reader := csv.NewReader(file)
+func readCSVReader(r io.Reader, filePath string, fieldsPerRecord int) ([][]string, bool) {
+	reader := csv.NewReader(r)
 	reader.LazyQuotes = true
 	reader.FieldsPerRecord = fieldsPerRecord
 	records, err := reader.ReadAll()
 	if err != nil {
-		log.Printf("Error al leer CSV %s: %v", filePath, err)
+		pipelineLog("Error al leer CSV %s: %v", filePath, err)
 		return nil, false
 	}
 	return records, true
@@ -98,13 +109,13 @@ func readCSV(filePath string, fieldsPerRecord int) ([][]string, bool) {
 func prepareRow(filePath string, record []string) (ts, sessionKey, deviceType, hash string, ok bool) {
 	ts, err := parseTimestamp(record[0])
 	if err != nil {
-		log.Printf("Skipping row en %s: invalid timestamp", filePath)
+		pipelineLog("Skipping row en %s: invalid timestamp", filePath)
 		return "", "", "", "", false
 	}
 	sessionKey = record[2]
 	deviceType = record[3]
 	if deviceType == "" {
-		log.Printf("Skipping row en %s: missing device_type", filePath)
+		pipelineLog("Skipping row en %s: missing device_type", filePath)
 		return "", "", "", "", false
 	}
 	return ts, sessionKey, deviceType, generateTrackingHash(sessionKey, deviceType), true
@@ -168,11 +179,14 @@ func marshalJSON(v any) string {
 // the ad_group column (index 5) is not read.
 func processGoogleClicks(filePath string) {
 	defer wg.Done()
-
 	records, ok := readCSV(filePath, 0)
 	if !ok {
 		return
 	}
+	ingestGoogle(filePath, records)
+}
+
+func ingestGoogle(filePath string, records [][]string) {
 	for i, record := range records {
 		if i == 0 {
 			continue
@@ -205,11 +219,14 @@ func processGoogleClicks(filePath string) {
 // the ad_set column (index 5) is not read.
 func processFacebookClicks(filePath string) {
 	defer wg.Done()
-
 	records, ok := readCSV(filePath, 0)
 	if !ok {
 		return
 	}
+	ingestFacebook(filePath, records)
+}
+
+func ingestFacebook(filePath string, records [][]string) {
 	for i, record := range records {
 		if i == 0 {
 			continue
@@ -241,11 +258,14 @@ func processFacebookClicks(filePath string) {
 // commas, so extra fields are joined back and the last field stays utm_channel.
 func processSiteEvents(filePath string) {
 	defer wg.Done()
-
 	records, ok := readCSV(filePath, -1)
 	if !ok {
 		return
 	}
+	ingestSite(filePath, records)
+}
+
+func ingestSite(filePath string, records [][]string) {
 	for i, record := range records {
 		if i == 0 {
 			continue
@@ -286,7 +306,7 @@ func processSiteEvents(filePath string) {
 // columns 5 through n-2 are joined and the last column is utm_channel.
 func normalizeSiteRecord(filePath string, record []string) ([]string, bool) {
 	if len(record) < 7 {
-		log.Printf("Skipping row en %s: número insuficiente de campos", filePath)
+		pipelineLog("Skipping row en %s: número insuficiente de campos", filePath)
 		return nil, false
 	}
 	if len(record) == 7 {
@@ -322,104 +342,4 @@ func websiteRevenue(actionType string, actionDetails map[string]any) float64 {
 	default:
 		return 0
 	}
-}
-
-// loadToDatabase creates dbPath if needed and inserts the in-memory rows
-// in one transaction. A second call appends; nothing is deleted or updated.
-func loadToDatabase(dbPath string) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		log.Fatalf("Error al abrir base de datos: %v", err)
-	}
-	defer db.Close()
-
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS tracked_user (
-		tracked_user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		user_id TEXT,
-		session_key TEXT,
-		tracking_hash TEXT,
-		utm_channel TEXT,
-		attributes TEXT,
-		earliest_time TEXT,
-		latest_time TEXT
-	);`)
-	if err != nil {
-		log.Fatalf("Error al crear tabla tracked_user: %v", err)
-	}
-
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS event (
-		event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		tracked_user_id INTEGER,
-		event_time TEXT,
-		event_type TEXT,
-		source TEXT,
-		campaign TEXT,
-		cost REAL,
-		revenue REAL,
-		metadata TEXT
-	);`)
-	if err != nil {
-		log.Fatalf("Error al crear tabla event: %v", err)
-	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		log.Fatalf("Error iniciando transacción: %v", err)
-	}
-
-	userStmt, err := tx.Prepare(`INSERT INTO tracked_user (
-		user_id, session_key, tracking_hash, utm_channel, attributes, earliest_time, latest_time
-	) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		log.Fatalf("Error preparando statement tracked_user: %v", err)
-	}
-
-	trackingHashToID := make(map[string]int64)
-	for hash, user := range trackedUsers {
-		res, err := userStmt.Exec(user.UserID, user.SessionKey, user.TrackingHash, user.UTMChannel, user.Attributes, user.EarliestTime, user.LatestTime)
-		if err != nil {
-			log.Printf("Error insertando usuario %s: %v", hash, err)
-			continue
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			log.Printf("Error obteniendo ID para usuario %s: %v", hash, err)
-			continue
-		}
-		trackingHashToID[hash] = id
-	}
-	_ = userStmt.Close()
-
-	eventStmt, err := tx.Prepare(`INSERT INTO event (
-		tracked_user_id, event_time, event_type, source, campaign, cost, revenue, metadata
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		log.Fatalf("Error preparando statement event: %v", err)
-	}
-	for _, event := range events {
-		userID, found := trackingHashToID[event.TrackingHash]
-		if !found {
-			continue
-		}
-		_, err = eventStmt.Exec(userID, event.EventTime, event.EventType, event.Source, event.Campaign, event.Cost, event.Revenue, event.Metadata)
-		if err != nil {
-			log.Printf("Error insertando evento para usuario %s: %v", event.TrackingHash, err)
-			continue
-		}
-	}
-	_ = eventStmt.Close()
-
-	if err := tx.Commit(); err != nil {
-		log.Fatalf("Error haciendo commit en transacción: %v", err)
-	}
-}
-
-func main() {
-	wg.Add(3)
-	go processGoogleClicks("google_clicks.csv")
-	go processFacebookClicks("facebook_clicks.csv")
-	go processSiteEvents("site_events.csv")
-	wg.Wait()
-	loadToDatabase(defaultDBPath)
-	fmt.Println("ETL completado y datos cargados en marketing_data.db")
 }

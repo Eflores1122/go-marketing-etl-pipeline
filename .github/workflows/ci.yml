@@ -34,3 +34,8 @@ jobs:
 
       - name: Test
         run: go test -race -count=1 ./...
+
+      - name: wasm smoke
+        run: |
+          bash scripts/build-site.sh
+          node scripts/wasm-smoke.mjs

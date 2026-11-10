@@ -13,3 +13,9 @@ coverage.out
 
 # OS and editor noise
 .DS_Store
+
+# Browser build outputs from scripts/build-site.sh
+site/etl.wasm
+site/wasm_exec.js
+site/build.json
+site/data/
