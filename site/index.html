@@ -20,7 +20,7 @@
   </header>
   <main id="top" class="wrap">
     <h1 data-i18n="title">Pipeline de marketing en el navegador</h1>
-    <p class="lede" data-i18n="lede">Esta página ejecuta el ETL de este repositorio, compilado a WebAssembly, sobre google_clicks.csv, facebook_clicks.csv y site_events.csv. Las cifras de abajo salen de esa ejecución.</p>
+    <p class="lede" data-i18n="lede">Esta página ejecuta el ETL de este repositorio, compilado a WebAssembly, sobre los CSV sintéticos de Taller Norte, una tienda ficticia de casa y ropa. Las cifras salen de esa ejecución.</p>
     <div class="row">
       <button type="button" class="primary" id="run-example" data-i18n="runExample">Correr el pipeline con datos de ejemplo</button>
     </div>
@@ -39,13 +39,43 @@
         <tbody></tbody>
       </table>
     </div>
+    <h2 id="por-dia" data-i18n="dailyHeading">Por día</h2>
+    <p class="note" data-i18n="dailyNote">Costo, ingreso, ROAS y conversiones de cada día con eventos. ROAS es ingreso dividido por costo. Si el costo de ese día es 0, el ROAS queda en n/d.</p>
+    <p class="legend">
+      <span><span class="swatch spend"></span> <span data-i18n="legendCost">Costo</span></span>
+      <span><span class="swatch back"></span> <span data-i18n="legendRevenue">Ingreso</span></span>
+    </p>
+    <figure id="daily-figure" hidden>
+      <svg id="daily-chart" role="img" aria-labelledby="daily-title daily-desc" viewBox="0 0 760 200">
+        <title id="daily-title" data-i18n="dailyHeading">Por día</title>
+        <desc id="daily-desc"></desc>
+      </svg>
+      <figcaption data-i18n="dailyCaption">Eje horizontal: día. Eje vertical: suma de cost y de revenue. La barra de tinta es el costo y la azul es el ingreso. Fuente: los eventos de esta ejecución.</figcaption>
+    </figure>
+    <div class="table-scroll" id="daily-wrap" hidden>
+      <table id="daily">
+        <caption data-i18n="dailyTableCaption">Un día por fila, calculado por etl.wasm.</caption>
+        <thead>
+          <tr>
+            <th data-i18n="dayCol">Día</th>
+            <th class="num" data-i18n="costCol">Costo</th>
+            <th class="num" data-i18n="revenueCol">Ingreso</th>
+            <th class="num" data-i18n="roasCol">ROAS</th>
+            <th class="num" data-i18n="convCol">Conversiones</th>
+            <th class="num" data-i18n="clickCol">Clics</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
     <details id="aggregate">
       <summary data-i18n="aggregateToggle">Ver la consulta de los totales</summary>
       <pre class="source" id="aggregate-sql"></pre>
     </details>
 
     <h2 data-i18n="usersHeading">Usuarios unificados</h2>
-    <p class="note" id="users-note" data-i18n="usersNote">Una fila por hash. El id sigue el orden del map de Go, el mismo criterio que el INSERT nativo, y cambia entre procesos.</p>
+    <p class="note" id="users-note" data-i18n="usersNote">Una fila por hash. utm_channel es el del evento más temprano. Si dos eventos empatan en ese instante, queda el canal que ordena primero. El id sigue el orden del map de Go.</p>
     <div class="table-scroll" id="users-wrap" hidden>
       <table id="users">
         <caption data-i18n="usersCaption">tracked_user producido por runPipeline.</caption>
@@ -60,8 +90,13 @@
             <th>tracking_hash</th>
           </tr>
         </thead>
-        <tbody></tbody>
+        <tbody>        </tbody>
       </table>
+    </div>
+    <div class="row" id="users-pager" hidden>
+      <button type="button" class="secondary" id="users-prev" data-i18n="prev">Anterior</button>
+      <span id="users-page"></span>
+      <button type="button" class="secondary" id="users-next" data-i18n="next">Siguiente</button>
     </div>
 
     <h2 data-i18n="eventsHeading">Eventos</h2>
@@ -82,8 +117,13 @@
             <th>metadata</th>
           </tr>
         </thead>
-        <tbody></tbody>
+        <tbody>        </tbody>
       </table>
+    </div>
+    <div class="row" id="events-pager" hidden>
+      <button type="button" class="secondary" id="events-prev" data-i18n="prev">Anterior</button>
+      <span id="events-page"></span>
+      <button type="button" class="secondary" id="events-next" data-i18n="next">Siguiente</button>
     </div>
 
     <h2 data-i18n="costHeading">Costo por fuente</h2>
@@ -104,6 +144,7 @@
         <option value="totals" data-i18n-option="presetTotals">Costo e ingreso por fuente y tipo</option>
         <option value="byUser" data-i18n-option="presetByUser">Atribución por usuario</option>
         <option value="both" data-i18n-option="presetBoth">Usuarios con clics en las dos plataformas</option>
+        <option value="daily" data-i18n-option="presetDaily">Costo, ingreso y conversiones por día</option>
       </select>
       <button type="button" class="secondary" id="exec-sql" data-i18n="execSql">Ejecutar consulta</button>
     </div>

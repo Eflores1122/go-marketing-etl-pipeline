@@ -51,6 +51,8 @@ var (
 	wg           sync.WaitGroup
 	logMu        sync.Mutex
 	logLines     []string
+	skipMu       sync.Mutex
+	skippedRows  int
 )
 
 // pipelineLog writes the same line the CLI already printed and keeps a copy
@@ -61,6 +63,27 @@ func pipelineLog(format string, args ...any) {
 	logMu.Lock()
 	logLines = append(logLines, msg)
 	logMu.Unlock()
+}
+
+// skipRow logs a rejected data row and counts it. The native load used to
+// panic when an ad row was shorter than the indexes it reads.
+func skipRow(filePath, reason string) {
+	pipelineLog("Skipping row en %s: %s", filePath, reason)
+	skipMu.Lock()
+	skippedRows++
+	skipMu.Unlock()
+}
+
+func skippedCount() int {
+	skipMu.Lock()
+	defer skipMu.Unlock()
+	return skippedRows
+}
+
+func resetSkipped() {
+	skipMu.Lock()
+	skippedRows = 0
+	skipMu.Unlock()
 }
 
 // generateTrackingHash is hex(SHA-256(sessionKey + deviceType)) with no separator.
@@ -109,21 +132,23 @@ func readCSVReader(r io.Reader, filePath string, fieldsPerRecord int) ([][]strin
 func prepareRow(filePath string, record []string) (ts, sessionKey, deviceType, hash string, ok bool) {
 	ts, err := parseTimestamp(record[0])
 	if err != nil {
-		pipelineLog("Skipping row en %s: invalid timestamp", filePath)
+		skipRow(filePath, "invalid timestamp")
 		return "", "", "", "", false
 	}
 	sessionKey = record[2]
 	deviceType = record[3]
 	if deviceType == "" {
-		pipelineLog("Skipping row en %s: missing device_type", filePath)
+		skipRow(filePath, "missing device_type")
 		return "", "", "", "", false
 	}
 	return ts, sessionKey, deviceType, generateTrackingHash(sessionKey, deviceType), true
 }
 
 // upsertTrackedUser inserts a visitor or merges this row into the existing one.
-// user_id is written only when the stored id is still empty. utm_channel stays
-// on the first writer. earliest_time and latest_time expand to include ts.
+// user_id is written only when the stored id is still empty. utm_channel is the
+// channel on the earliest timestamp. Equal timestamps keep the channel that
+// sorts first, so the result does not depend on which goroutine runs first.
+// earliest_time and latest_time expand to include ts.
 func upsertTrackedUser(hash, userID, sessionKey, utmChannel, ts string) {
 	usersMutex.Lock()
 	defer usersMutex.Unlock()
@@ -132,8 +157,9 @@ func upsertTrackedUser(hash, userID, sessionKey, utmChannel, ts string) {
 		if existing.UserID == "" && userID != "" {
 			existing.UserID = userID
 		}
-		if ts < existing.EarliestTime {
+		if ts < existing.EarliestTime || (ts == existing.EarliestTime && utmChannel < existing.UTMChannel) {
 			existing.EarliestTime = ts
+			existing.UTMChannel = utmChannel
 		}
 		if ts > existing.LatestTime {
 			existing.LatestTime = ts
@@ -179,7 +205,7 @@ func marshalJSON(v any) string {
 // the ad_group column (index 5) is not read.
 func processGoogleClicks(filePath string) {
 	defer wg.Done()
-	records, ok := readCSV(filePath, 0)
+	records, ok := readCSV(filePath, -1)
 	if !ok {
 		return
 	}
@@ -189,6 +215,10 @@ func processGoogleClicks(filePath string) {
 func ingestGoogle(filePath string, records [][]string) {
 	for i, record := range records {
 		if i == 0 {
+			continue
+		}
+		if len(record) < 9 {
+			skipRow(filePath, "columnas insuficientes")
 			continue
 		}
 		ts, sessionKey, _, hash, ok := prepareRow(filePath, record)
@@ -219,7 +249,7 @@ func ingestGoogle(filePath string, records [][]string) {
 // the ad_set column (index 5) is not read.
 func processFacebookClicks(filePath string) {
 	defer wg.Done()
-	records, ok := readCSV(filePath, 0)
+	records, ok := readCSV(filePath, -1)
 	if !ok {
 		return
 	}
@@ -229,6 +259,10 @@ func processFacebookClicks(filePath string) {
 func ingestFacebook(filePath string, records [][]string) {
 	for i, record := range records {
 		if i == 0 {
+			continue
+		}
+		if len(record) < 9 {
+			skipRow(filePath, "columnas insuficientes")
 			continue
 		}
 		ts, sessionKey, _, hash, ok := prepareRow(filePath, record)
@@ -306,7 +340,7 @@ func ingestSite(filePath string, records [][]string) {
 // columns 5 through n-2 are joined and the last column is utm_channel.
 func normalizeSiteRecord(filePath string, record []string) ([]string, bool) {
 	if len(record) < 7 {
-		pipelineLog("Skipping row en %s: número insuficiente de campos", filePath)
+		skipRow(filePath, "número insuficiente de campos")
 		return nil, false
 	}
 	if len(record) == 7 {

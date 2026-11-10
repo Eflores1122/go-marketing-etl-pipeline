@@ -319,6 +319,33 @@ figure {
   display: block;
 }
 
+.legend {
+  display: flex;
+  gap: 1.25rem;
+  margin: 0.25rem 0 0.5rem;
+  color: var(--ink);
+}
+
+.swatch {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.55rem;
+  margin-right: 0.3rem;
+  vertical-align: middle;
+}
+
+.swatch.spend { background: var(--ink); }
+.swatch.back { background: var(--accent); }
+
+#daily-chart text {
+  fill: var(--ink);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+#daily-chart .spend { fill: var(--ink); }
+#daily-chart .back { fill: var(--accent); }
+
 #cost-chart text {
   fill: var(--ink);
   font-family: var(--sans);

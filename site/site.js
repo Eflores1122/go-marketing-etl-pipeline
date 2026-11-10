@@ -14,6 +14,19 @@ SELECT
   (SELECT COALESCE(SUM(revenue), 0) FROM event) AS revenue
 `.trim();
 
+const PAGE = 25;
+
+const DAILY = `
+SELECT substr(event_time, 1, 10) AS day,
+       SUM(cost) AS cost,
+       SUM(revenue) AS revenue,
+       SUM(CASE WHEN event_type = 'conversion' THEN 1 ELSE 0 END) AS conversions,
+       SUM(CASE WHEN event_type = 'click' THEN 1 ELSE 0 END) AS clicks
+FROM event
+GROUP BY day
+ORDER BY day
+`.trim();
+
 const QUERIES = {
   totals: `
 SELECT source, event_type, COUNT(*) AS events, SUM(cost) AS cost, SUM(revenue) AS revenue
@@ -35,6 +48,7 @@ LEFT JOIN event e ON e.tracked_user_id = tu.tracked_user_id
 GROUP BY tu.tracked_user_id, tu.user_id, tu.session_key, tu.utm_channel, tu.earliest_time, tu.latest_time
 ORDER BY tu.session_key, tu.tracked_user_id
 `.trim(),
+  daily: DAILY,
   both: `
 SELECT tu.tracked_user_id, tu.session_key, tu.user_id,
        SUM(CASE WHEN e.source = 'Google Ads' AND e.event_type = 'click' THEN 1 ELSE 0 END) AS google_clicks,
@@ -52,7 +66,7 @@ ORDER BY tu.session_key
 const LINEAGE = [
   ["tracked_user.tracking_hash", "session_key, device_type", "hash"],
   ["tracked_user.user_id", "user_id", "userId"],
-  ["tracked_user.utm_channel", "utm_channel", "channel"],
+  ["tracked_user.utm_channel", "utm_channel del evento más temprano", "channel"],
   ["tracked_user.attributes", "constante / constant", "attributes"],
   ["tracked_user.earliest_time, latest_time", "timestamp", "window"],
   ["event.event_type", "click, action_type", "eventType"],
@@ -69,7 +83,7 @@ const copy = {
   es: {
     skip: "Saltar al resultado",
     title: "Pipeline de marketing en el navegador",
-    lede: "Esta página ejecuta el ETL de este repositorio, compilado a WebAssembly, sobre google_clicks.csv, facebook_clicks.csv y site_events.csv. Las cifras de abajo salen de esa ejecución.",
+    lede: "Esta página ejecuta el ETL de este repositorio, compilado a WebAssembly, sobre los CSV sintéticos de Taller Norte, una tienda ficticia de casa y ropa. Las cifras salen de esa ejecución.",
     runExample: "Correr el pipeline con datos de ejemplo",
     loading: "Cargando etl.wasm y los CSV del repositorio.",
     resultHeading: "Resultado de esta ejecución",
@@ -78,7 +92,25 @@ const copy = {
     value: "Valor",
     aggregateToggle: "Ver la consulta de los totales",
     usersHeading: "Usuarios unificados",
-    usersNote: "Una fila por hash. El id sigue el orden del map de Go, el mismo criterio que el INSERT nativo, y cambia entre procesos.",
+    usersNote: "Una fila por hash. utm_channel es el del evento más temprano. Si dos eventos empatan en ese instante, queda el canal que ordena primero. El id sigue el orden del map de Go.",
+    dailyHeading: "Por día",
+    dailyNote: "Costo, ingreso, ROAS y conversiones de cada día con eventos. ROAS es ingreso dividido por costo. Si el costo de ese día es 0, el ROAS queda en n/d.",
+    dailyCaption: "Eje horizontal: día. Eje vertical: suma de cost y de revenue. La barra de tinta es el costo y la azul es el ingreso. Fuente: los eventos de esta ejecución.",
+    dailyTableCaption: "Un día por fila, calculado por etl.wasm.",
+    legendCost: "Costo",
+    legendRevenue: "Ingreso",
+    dayCol: "Día",
+    costCol: "Costo",
+    revenueCol: "Ingreso",
+    roasCol: "ROAS",
+    convCol: "Conversiones",
+    clickCol: "Clics",
+    roas: "ROAS",
+    totalCost: "Costo",
+    na: "n/d",
+    prev: "Anterior",
+    next: "Siguiente",
+    pageOf: "Filas {from} a {to} de {total}",
     usersCaption: "tracked_user producido por runPipeline.",
     eventsHeading: "Eventos",
     eventsNote: "Orden de esta tabla: event_time, luego source. El slice en memoria conserva el orden en que terminaron los workers.",
@@ -90,6 +122,7 @@ const copy = {
     presetTotals: "Costo e ingreso por fuente y tipo",
     presetByUser: "Atribución por usuario",
     presetBoth: "Usuarios con clics en las dos plataformas",
+    presetDaily: "Costo, ingreso y conversiones por día",
     execSql: "Ejecutar consulta",
     queryLabel: "SQL sobre las tablas de esta carga",
     sqlHint: "Ejecutar consulta corre el texto de arriba. El número de conversores del resultado de esta ejecución sigue siendo bonus_query.sql del repositorio, aunque edites este cuadro. Ctrl+Enter también ejecuta.",
@@ -109,13 +142,13 @@ const copy = {
     limitsHeading: "Qué cambia en el navegador",
     limit1: "modernc.org/sqlite v1.34.5 no entra en etl.wasm. Con GOOS=js GOARCH=wasm, modernc.org/libc excluye errno, pthread, signal, stdio, sys/types, time y unistd: sus archivos no declaran ese GOOS. go build de ese par lo rechaza. Por eso esta página no abre marketing_data.db. Las filas salen del mismo código de ingesta, compilado con la toolchain estándar de Go, y la consulta corre en sql.js 1.11.0, que es SQLite en WebAssembly.",
     limit2: "Cada corrida arma una base nueva. Un segundo go run . en la terminal añade otra copia al archivo. Aquí no hay archivo que conservar.",
-    limit3: "Las goroutines y los mutex son los del programa. En el navegador el runtime de Go las reparte en un solo hilo de JavaScript, así que el utm_channel de sess-006 puede repetirse en cada recarga aunque en un proceso nativo cambie.",
+    limit3: "utm_channel es el canal del evento más temprano de ese hash. Si dos eventos empatan en ese instante, queda el nombre de canal que ordena primero. La regla es la misma en go run . y en este binario, así que el hilo único de JavaScript ya no cambia el canal.",
     limit4: "tracked_user_id sale del orden de iteración del map. Es el mismo criterio que el INSERT nativo y no es estable entre procesos.",
-    limit5: "Una fila de anuncios demasiado corta provoca un pánico de índice. Este binario lo anota en Filas omitidas y sigue. go run . aborta. Los CSV de ejemplo no disparan ese caso. Sus action_details tampoco son JSON válido, así que las cuatro filas del sitio quedan con metadata {} y revenue 0.",
+    limit5: "Una fila de anuncios con menos de 9 columnas se omite y se cuenta. go run . ya no aborta por eso. Los CSV de Taller Norte no traen filas cortas. action_details es JSON válido, y el ingreso de una compra sale de value.",
     colophon: "Texto en IBM Plex Sans e IBM Plex Mono, de IBM, licencia SIL Open Font. IBM Plex tiene cifras tabulares, que es lo que usa una tabla de costos. El azul #1C4E89 es el del papel carbón: esta página es una copia del pipeline nativo, con el mismo código de transformación y la misma consulta.",
     hash: "hex(SHA-256(session_key + device_type)), sin separador. session_key ab con device_type c produce el mismo hash que session_key a con device_type bc.",
     userId: "Se escribe solo cuando el valor guardado sigue vacío.",
-    channel: "Se queda el del primer worker que inserta el hash.",
+    channel: "Es el utm_channel del evento con la hora más temprana. Si empatan, queda el canal que ordena primero.",
     attributes: "El literal {}.",
     window: "Mínimo y máximo. La comparación es texto con forma YYYY-MM-DD HH:MM:SS.",
     eventType: "purchase y signup se guardan como conversion. Cualquier otra acción se guarda tal cual.",
@@ -147,7 +180,7 @@ const copy = {
   en: {
     skip: "Skip to the result",
     title: "Marketing pipeline in the browser",
-    lede: "This page runs this repository's ETL, compiled to WebAssembly, on google_clicks.csv, facebook_clicks.csv, and site_events.csv. The figures below come from that run.",
+    lede: "This page runs this repository's ETL, compiled to WebAssembly, on the synthetic CSVs for Taller Norte, a fictional home and clothing shop. The figures come from that run.",
     runExample: "Run the pipeline on the sample data",
     loading: "Loading etl.wasm and the repository CSVs.",
     resultHeading: "Result of this run",
@@ -156,7 +189,25 @@ const copy = {
     value: "Value",
     aggregateToggle: "Show the totals query",
     usersHeading: "Unified users",
-    usersNote: "One row per hash. The id follows Go map order, the same rule as the native INSERT, and it changes across processes.",
+    usersNote: "One row per hash. utm_channel comes from the earliest event. If two events share that timestamp, the channel that sorts first is kept. The id follows Go map order.",
+    dailyHeading: "By day",
+    dailyNote: "Cost, revenue, ROAS, and conversions for each day that has events. ROAS is revenue divided by cost. A day with no cost shows n/a.",
+    dailyCaption: "Horizontal axis: day. Vertical axis: sum of cost and of revenue. The ink bar is cost and the blue bar is revenue. Source: the events from this run.",
+    dailyTableCaption: "One row per day, calculated by etl.wasm.",
+    legendCost: "Cost",
+    legendRevenue: "Revenue",
+    dayCol: "Day",
+    costCol: "Cost",
+    revenueCol: "Revenue",
+    roasCol: "ROAS",
+    convCol: "Conversions",
+    clickCol: "Clicks",
+    roas: "ROAS",
+    totalCost: "Cost",
+    na: "n/a",
+    prev: "Previous",
+    next: "Next",
+    pageOf: "Rows {from} to {to} of {total}",
     usersCaption: "tracked_user produced by runPipeline.",
     eventsHeading: "Events",
     eventsNote: "This table is ordered by event_time, then source. The memory slice keeps the order in which the workers finished.",
@@ -168,6 +219,7 @@ const copy = {
     presetTotals: "Cost and revenue by source and type",
     presetByUser: "Attribution by user",
     presetBoth: "Users with clicks on both platforms",
+    presetDaily: "Cost, revenue, and conversions by day",
     execSql: "Run query",
     queryLabel: "SQL on the tables from this load",
     sqlHint: "Run query executes the text above. The converter count in this run's result stays bonus_query.sql from the repository, even if you edit this box. Ctrl+Enter also runs it.",
@@ -187,13 +239,13 @@ const copy = {
     limitsHeading: "What changes in the browser",
     limit1: "modernc.org/sqlite v1.34.5 is not linked into etl.wasm. With GOOS=js GOARCH=wasm, modernc.org/libc excludes errno, pthread, signal, stdio, sys/types, time, and unistd, because those files do not declare that GOOS. go build for that pair rejects the import. This page therefore does not open marketing_data.db. The rows come from the same ingest code, compiled with the standard Go toolchain, and the query runs in sql.js 1.11.0, which is SQLite compiled to WebAssembly.",
     limit2: "Each run builds a new database. A second go run . in the terminal appends another copy to the file. There is no file to keep here.",
-    limit3: "The goroutines and mutexes are the program's. In the browser the Go runtime schedules them on one JavaScript thread, so sess-006's utm_channel can repeat on every reload even when a native process changes it.",
+    limit3: "utm_channel is the channel of the earliest event for that hash. If two events share that timestamp, the channel name that sorts first is kept. go run . and this binary use the same rule, so the single JavaScript thread no longer changes the channel.",
     limit4: "tracked_user_id comes from map iteration order. That is the same rule as the native INSERT, and it is not stable across processes.",
-    limit5: "An ad row that is too short panics on an index. This binary records it under Skipped rows and continues. go run . aborts. The sample CSVs do not hit that case. Their action_details values are not valid JSON either, so the four website rows keep metadata {} and revenue 0.",
+    limit5: "An ad row with fewer than 9 columns is skipped and counted. go run . no longer aborts on it. The Taller Norte CSVs have no short rows. action_details is valid JSON, and purchase revenue comes from value.",
     colophon: "Text is set in IBM Plex Sans and IBM Plex Mono, by IBM, under the SIL Open Font License. IBM Plex has tabular figures, which a cost table needs. Blue #1C4E89 is the blue of carbon paper: this page is a copy of the native pipeline, with the same transform code and the same query.",
     hash: "hex(SHA-256(session_key + device_type)), with no separator. session_key ab with device_type c hashes the same as session_key a with device_type bc.",
     userId: "Written only while the stored value is still empty.",
-    channel: "Kept from the first worker that inserts the hash.",
+    channel: "The utm_channel of the earliest event. On a timestamp tie, the channel that sorts first is kept.",
     attributes: "The literal {}.",
     window: "Minimum and maximum. The comparison is text in the shape YYYY-MM-DD HH:MM:SS.",
     eventType: "purchase and signup are stored as conversion. Any other action is stored unchanged.",
@@ -245,6 +297,8 @@ const state = {
   agreement: [],
   lastSql: null,
   build: null,
+  userPage: 0,
+  eventPage: 0,
 };
 
 function t(key) {
@@ -468,6 +522,19 @@ function compare(result, totals, bonusValue) {
   return [prefix + " " + bad.join("; ") + "."];
 }
 
+function money(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return value == null ? "" : String(value);
+  return number.toFixed(2);
+}
+
+function roasText(revenue, cost) {
+  const spent = Number(cost);
+  const earned = Number(revenue);
+  if (!Number.isFinite(spent) || spent === 0) return t("na");
+  return (earned / spent).toFixed(2);
+}
+
 function ledgerNumbers() {
   if (state.totals && state.bonusValue != null && !state.sqlFailed) {
     return {
@@ -504,17 +571,15 @@ function renderLedger() {
   const numbers = ledgerNumbers();
   const table = document.getElementById("ledger");
   table.querySelector("caption").textContent = numbers.fromSql ? t("ledgerSql") : t("ledgerGo");
+  const totalCost = Number(numbers.google_cost) + Number(numbers.facebook_cost) + Number(numbers.website_cost);
   const rows = [
-    ["multi", numbers.multi, true],
+    ["roas", roasText(numbers.revenue, totalCost), true],
+    ["revenueLabel", numbers.revenue, false],
+    ["totalCost", totalCost, false],
+    ["conversions", numbers.conversions, false],
+    ["multi", numbers.multi, false],
     ["users", numbers.users, false],
     ["events", numbers.events, false],
-    ["clicks", numbers.clicks, false],
-    ["views", numbers.views, false],
-    ["conversions", numbers.conversions, false],
-    ["googleCost", numbers.google_cost, false],
-    ["facebookCost", numbers.facebook_cost, false],
-    ["websiteCost", numbers.website_cost, false],
-    ["revenueLabel", numbers.revenue, false],
   ];
   const tbody = table.querySelector("tbody");
   tbody.replaceChildren();
@@ -525,11 +590,17 @@ function renderLedger() {
     measure.textContent = t(key);
     const cell = document.createElement("td");
     cell.className = "num";
-    cell.textContent = fmt(value);
+    cell.textContent = key === "roas" ? value : key === "revenueLabel" || key === "totalCost" ? money(value) : fmt(value);
     tr.append(measure, cell);
     tbody.appendChild(tr);
   }
   document.getElementById("ledger-wrap").hidden = false;
+}
+
+function pageLabel(page, total) {
+  const from = total === 0 ? 0 : page * PAGE + 1;
+  const to = Math.min(total, page * PAGE + PAGE);
+  return t("pageOf").replace("{from}", String(from)).replace("{to}", String(to)).replace("{total}", String(total));
 }
 
 function renderUsers() {
@@ -538,7 +609,9 @@ function renderUsers() {
   const users = state.result.users.slice().sort((a, b) => {
     return a.session_key.localeCompare(b.session_key) || a.tracked_user_id - b.tracked_user_id;
   });
-  for (const user of users) {
+  const start = state.userPage * PAGE;
+  const visible = users.slice(start, start + PAGE);
+  for (const user of visible) {
     const tr = document.createElement("tr");
     const cells = [
       [String(user.tracked_user_id), "num"],
@@ -558,6 +631,10 @@ function renderUsers() {
     tbody.appendChild(tr);
   }
   document.getElementById("users-wrap").hidden = false;
+  document.getElementById("users-pager").hidden = false;
+  document.getElementById("users-page").textContent = pageLabel(state.userPage, users.length);
+  document.getElementById("users-prev").disabled = state.userPage === 0;
+  document.getElementById("users-next").disabled = start + PAGE >= users.length;
 }
 
 function renderEvents() {
@@ -566,7 +643,9 @@ function renderEvents() {
   const events = state.result.events.slice().sort((a, b) => {
     return a.event_time.localeCompare(b.event_time) || a.source.localeCompare(b.source) || a.event_id - b.event_id;
   });
-  for (const event of events) {
+  const start = state.eventPage * PAGE;
+  const visible = events.slice(start, start + PAGE);
+  for (const event of visible) {
     const tr = document.createElement("tr");
     const cells = [
       [String(event.event_id), "num"],
@@ -588,6 +667,89 @@ function renderEvents() {
     tbody.appendChild(tr);
   }
   document.getElementById("events-wrap").hidden = false;
+  document.getElementById("events-pager").hidden = false;
+  document.getElementById("events-page").textContent = pageLabel(state.eventPage, events.length);
+  document.getElementById("events-prev").disabled = state.eventPage === 0;
+  document.getElementById("events-next").disabled = start + PAGE >= events.length;
+}
+
+function renderDaily() {
+  const days = state.result.summary.days || [];
+  const tbody = document.querySelector("#daily tbody");
+  tbody.replaceChildren();
+  for (const day of days) {
+    const tr = document.createElement("tr");
+    const cells = [
+      [day.day, ""],
+      [money(day.cost), "num"],
+      [money(day.revenue), "num"],
+      [roasText(day.revenue, day.cost), "num"],
+      [fmt(day.conversions), "num"],
+      [fmt(day.clicks), "num"],
+    ];
+    for (const [text, className] of cells) {
+      const td = document.createElement("td");
+      if (className) td.className = className;
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  document.getElementById("daily-wrap").hidden = days.length === 0;
+  const svg = document.getElementById("daily-chart");
+  svg.querySelector("title").textContent = t("dailyHeading");
+  const max = Math.max(...days.map((day) => Math.max(Number(day.cost), Number(day.revenue))), 0);
+  const desc = days.length
+    ? days[0].day + " .. " + days[days.length - 1].day + ". max " + fmt(max) + "."
+    : "";
+  document.getElementById("daily-desc").textContent = desc;
+  [...svg.children].forEach((node) => {
+    if (node.tagName.toLowerCase() !== "title" && node.tagName.toLowerCase() !== "desc") node.remove();
+  });
+  const ns = "http://www.w3.org/2000/svg";
+  const plotX = 44;
+  const plotW = 700;
+  const baseY = 158;
+  const plotH = 124;
+  const slot = days.length ? plotW / days.length : plotW;
+  days.forEach((day, index) => {
+    const x = plotX + index * slot;
+    const costH = max === 0 ? 0 : (Number(day.cost) / max) * plotH;
+    const revH = max === 0 ? 0 : (Number(day.revenue) / max) * plotH;
+    const costBar = document.createElementNS(ns, "rect");
+    costBar.setAttribute("class", "spend");
+    costBar.setAttribute("x", String(x + 2));
+    costBar.setAttribute("y", String(baseY - costH));
+    costBar.setAttribute("width", "8");
+    costBar.setAttribute("height", String(Math.max(costH, 0)));
+    const revBar = document.createElementNS(ns, "rect");
+    revBar.setAttribute("class", "back");
+    revBar.setAttribute("x", String(x + 12));
+    revBar.setAttribute("y", String(baseY - revH));
+    revBar.setAttribute("width", "8");
+    revBar.setAttribute("height", String(Math.max(revH, 0)));
+    svg.append(costBar, revBar);
+    if (index % 5 === 0 || index === days.length - 1) {
+      const label = document.createElementNS(ns, "text");
+      label.setAttribute("x", String(x + 2));
+      label.setAttribute("y", "176");
+      label.textContent = day.day.slice(5);
+      svg.appendChild(label);
+    }
+  });
+  const axis = document.createElementNS(ns, "line");
+  axis.setAttribute("x1", String(plotX));
+  axis.setAttribute("x2", String(plotX + plotW));
+  axis.setAttribute("y1", String(baseY));
+  axis.setAttribute("y2", String(baseY));
+  axis.setAttribute("stroke", "#1a1f24");
+  svg.appendChild(axis);
+  const top = document.createElementNS(ns, "text");
+  top.setAttribute("x", "0");
+  top.setAttribute("y", "28");
+  top.textContent = fmt(max);
+  svg.appendChild(top);
+  document.getElementById("daily-figure").hidden = days.length === 0;
 }
 
 function renderChart() {
@@ -690,13 +852,14 @@ function renderNarrative() {
       lines.push("En esta ejecución, " + both + " usuarios unificados tienen un clic de Google Ads y un clic de Facebook Ads. bonus_query.sql devolvió " + fmt(state.bonusValue) + ".");
     }
     lines.push("La identidad es session_key concatenado con device_type. El mismo user_id en otra sesión es otra fila, y la consulta no la junta.");
-    if (repeats.length) {
+    lines.push("utm_channel es el del evento más temprano de ese hash. Si empatan la hora, queda el canal que ordena primero.");
+    if (repeats.length > 6) {
+      lines.push(repeats.length + " user_id aparecen en más de una sesión.");
+    } else if (repeats.length) {
       lines.push("user_id en más de una sesión: " + repeats.map((row) => row.id + " (" + row.sessions + ")").join(", ") + ".");
     }
     if (sess.length === 1) {
-      lines.push("sess-006 quedó con utm_channel " + sess[0].utm_channel + ". Lo escribe el primer worker que crea ese hash.");
-    } else if (sess.length > 1) {
-      lines.push("sess-006 produjo " + sess.length + " hashes en esta carga.");
+      lines.push("sess-006 quedó con utm_channel " + sess[0].utm_channel + ", el de su evento más temprano.");
     }
     lines.push("El mismo predicado dentro del binario Go devolvió " + goMulti + ".");
   } else {
@@ -706,13 +869,14 @@ function renderNarrative() {
       lines.push("In this run, " + both + " unified users have a Google Ads click and a Facebook Ads click. bonus_query.sql returned " + fmt(state.bonusValue) + ".");
     }
     lines.push("Identity is session_key concatenated with device_type. The same user_id on another session is another row, and the query does not merge it.");
-    if (repeats.length) {
+    lines.push("utm_channel comes from the earliest event on that hash. A timestamp tie keeps the channel that sorts first.");
+    if (repeats.length > 6) {
+      lines.push(repeats.length + " user_id values appear on more than one session.");
+    } else if (repeats.length) {
       lines.push("user_id on more than one session: " + repeats.map((row) => row.id + " (" + row.sessions + ")").join(", ") + ".");
     }
     if (sess.length === 1) {
-      lines.push("sess-006 kept utm_channel " + sess[0].utm_channel + ". The first worker to create that hash writes it.");
-    } else if (sess.length > 1) {
-      lines.push("sess-006 produced " + sess.length + " hashes in this load.");
+      lines.push("sess-006 kept utm_channel " + sess[0].utm_channel + ", from its earliest event.");
     }
     lines.push("The same predicate inside the Go binary returned " + goMulti + ".");
   }
@@ -837,6 +1001,7 @@ function renderSql(outcome) {
 
 function renderResult() {
   renderLedger();
+  renderDaily();
   renderUsers();
   renderEvents();
   renderChart();
@@ -854,10 +1019,13 @@ async function execute(samples) {
     const result = JSON.parse(raw);
     if (result.error) throw new Error(result.error);
     state.result = result;
+    state.userPage = 0;
+    state.eventPage = 0;
     const sqlStarted = performance.now();
     reloadDatabase(result);
     const totalsOutcome = execRaw(AGGREGATE);
     const bonusOutcome = execRaw(state.bonusSQL);
+    const dailyOutcome = execRaw(DAILY);
     state.sqlMs = performance.now() - sqlStarted;
     state.totals = totalsOutcome.ok ? rowObject(totalsOutcome.sets[0]) : null;
     state.bonusValue = null;
@@ -868,7 +1036,7 @@ async function execute(samples) {
         state.bonusValue = bonusOutcome.sets[0].values[0][column];
       }
     }
-    state.agreement = compare(result, state.totals, state.bonusValue);
+    state.agreement = compare(result, state.totals, state.bonusValue).concat(compareDaily(result.summary.days || [], dailyOutcome));
     renderResult();
     const editor = document.getElementById("query").value;
     if (editor.trim() === state.bonusSQL.trim()) {
@@ -928,6 +1096,31 @@ async function drawDiagram() {
   }
 }
 
+function compareDaily(goDays, outcome) {
+  if (!outcome.ok || !outcome.sets.length || !outcome.sets[0]) {
+    return [state.lang === "es" ? "sql.js no devolvió la serie diaria." : "sql.js did not return the daily series."];
+  }
+  const set = outcome.sets[0];
+  const idx = {};
+  set.columns.forEach((name, index) => {
+    idx[name] = index;
+  });
+  if (set.values.length !== goDays.length) {
+    return [(state.lang === "es" ? "Días: sql.js " : "Days: sql.js ") + set.values.length + " / go " + goDays.length + "."];
+  }
+  const bad = [];
+  set.values.forEach((row, index) => {
+    const go = goDays[index];
+    if (row[idx.day] !== go.day) bad.push(String(go.day));
+    if (Math.abs(Number(row[idx.cost]) - Number(go.cost)) >= 1e-6) bad.push(go.day + " cost");
+    if (Math.abs(Number(row[idx.revenue]) - Number(go.revenue)) >= 1e-6) bad.push(go.day + " revenue");
+    if (Number(row[idx.conversions]) !== go.conversions) bad.push(go.day + " conversions");
+  });
+  if (!bad.length) return [];
+  const prefix = state.lang === "es" ? "Desacuerdo en la serie diaria:" : "Daily series disagrees:";
+  return [prefix + " " + bad.slice(0, 6).join(", ") + "."];
+}
+
 function bind() {
   document.getElementById("lang-es").addEventListener("click", () => setLang("es"));
   document.getElementById("lang-en").addEventListener("click", () => setLang("en"));
@@ -952,6 +1145,22 @@ function bind() {
     fillEditors(samples);
   });
   document.getElementById("exec-sql").addEventListener("click", runEditorQuery);
+  document.getElementById("users-prev").addEventListener("click", () => {
+    state.userPage = Math.max(0, state.userPage - 1);
+    renderUsers();
+  });
+  document.getElementById("users-next").addEventListener("click", () => {
+    state.userPage += 1;
+    renderUsers();
+  });
+  document.getElementById("events-prev").addEventListener("click", () => {
+    state.eventPage = Math.max(0, state.eventPage - 1);
+    renderEvents();
+  });
+  document.getElementById("events-next").addEventListener("click", () => {
+    state.eventPage += 1;
+    renderEvents();
+  });
   document.getElementById("preset").addEventListener("change", (event) => {
     document.getElementById("query").value = presetText(event.target.value);
     runEditorQuery();
