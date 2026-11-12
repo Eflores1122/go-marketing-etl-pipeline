@@ -11,8 +11,18 @@
 coverage.out
 /bin/
 
+# Python generator caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
 # OS and editor noise
 .DS_Store
+.idea/
+.vscode/
+*.swp
+*~
 
 # Browser build outputs from scripts/build-site.sh
 site/etl.wasm

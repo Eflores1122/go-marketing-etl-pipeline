@@ -84,13 +84,13 @@ type PipelineResult struct {
 }
 
 // runPipeline resets shared state, runs the three workers on CSV text, and
-// returns rows with ids. A short ad row that would panic the native binary is
-// reported in Logs so the browser process stays up.
+// returns rows with ids. Field counts are variable, same as the native file
+// workers, so one short row is skipped and the rest of that CSV is kept.
 func runPipeline(googleCSV, facebookCSV, siteCSV string) PipelineResult {
 	resetRunState()
 	wg.Add(3)
-	go ingestCSV("google_clicks.csv", googleCSV, 0, ingestGoogle)
-	go ingestCSV("facebook_clicks.csv", facebookCSV, 0, ingestFacebook)
+	go ingestCSV("google_clicks.csv", googleCSV, -1, ingestGoogle)
+	go ingestCSV("facebook_clicks.csv", facebookCSV, -1, ingestFacebook)
 	go ingestCSV("site_events.csv", siteCSV, -1, ingestSite)
 	wg.Wait()
 

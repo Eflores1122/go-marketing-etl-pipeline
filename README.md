@@ -1,8 +1,10 @@
 # Marketing ETL pipeline in Go
 
-Sitio con el pipeline en el navegador: https://eflores1122.github.io/go-marketing-etl-pipeline/
+Concurrent Go ETL that merges Google Ads clicks, Facebook Ads clicks, and website events into SQLite, and deduplicates visitors with a hash of session and device.
 
-This repository is a portfolio project. The checked-in CSVs are a synthetic extract for Taller Norte, a fictional home-and-clothing shop, written by `scripts/generate_retail.py` with seed `20260311`. The program reads those Google Ads and Facebook Ads clicks plus the website event log, deduplicates visitors in memory, and loads two SQLite tables. A SQL file counts multi-channel converters. An Airbyte setup is described below as a proposal only; this program does not call Airbyte.
+The same pipeline runs in the browser: https://eflores1122.github.io/go-marketing-etl-pipeline/
+
+This repository is a portfolio project. The checked-in CSVs are a synthetic extract for Taller Norte, a fictional home-and-clothing shop, written by `scripts/generate_retail.py` with seed `20260311`. They are not a Google or Facebook export and they are not production traffic. The program reads those clicks plus the website event log, deduplicates visitors in memory, and loads two SQLite tables. A SQL file counts multi-channel converters. An Airbyte setup is described below as a proposal only; this program does not call Airbyte.
 
 Run it from the repository root. The database file `marketing_data.db` is created on load and is gitignored.
 
@@ -22,7 +24,7 @@ The job is to produce:
 - `event`: one row per click or site action, pointing at that user
 - `bonus_query.sql`: how many tracked users converted after both a Google Ads click and a Facebook Ads click
 
-Rows with a timestamp the parser rejects, an empty `device_type`, or too few columns are skipped and counted. A website row needs seven fields. A Google or Facebook row needs nine, because the loader reads indexes 0 through 8. One short ad row no longer aborts the process or drops the rest of the file.
+Rows with a timestamp the parser rejects, an empty `device_type`, or too few columns are skipped and counted. A website row needs seven fields. A Google or Facebook row needs nine, because the loader reads indexes 0 through 8. The CSV reader is set to a variable field count in the file workers and in `runPipeline`, so one short ad row is counted and the rest of that file is still loaded.
 
 ## Architecture
 
@@ -146,17 +148,28 @@ tracking_hash = hex(SHA-256(session_key + device_type))
 
 There is no separator between the two strings. `session_key = "ab"` with `device_type = "c"` produces the same hash as `session_key = "a"` with `device_type = "bc"`.
 
-The same hash from any file collapses to one in-memory user for that run. A different device on the same session is a different user. The same `user_id` on two sessions is also two users: the pipeline does not resolve identity across sessions. That is why `user-abc` and `user-ghi` can appear on both ad platforms and still fail the bonus query. The query joins `tracked_user_id`, and each sample conversion shares a tracked user with only one ad source.
+The same hash from any file collapses to one in-memory user for that run. A different device on the same session is a different user. The same `user_id` on two sessions is also two users: the pipeline does not resolve identity across sessions. The bonus query joins `tracked_user_id`, so two sessions for one shopper stay two people. On the Taller Norte files, the 17 multi-channel converters are sessions where both ad clicks happen before the conversion on that same session and device.
 
 `bonus_query.sql` counts distinct tracked users who have a `conversion` and, at an earlier `event_time`, both a `Google Ads` click and a `Facebook Ads` click.
 
+## Tech stack
+
+- Go 1.22.2, as declared in `go.mod`. Standard library for CSV, SHA-256, JSON, and `database/sql`.
+- `modernc.org/sqlite` v1.34.5, a pure-Go SQLite driver. No CGO.
+- Goroutines and mutexes for the three file workers. The SQLite load runs after they finish.
+- WebAssembly (`GOOS=js GOARCH=wasm`) for the browser build. That build does not link SQLite.
+- [sql.js](https://github.com/sql-js/sql.js) 1.11.0, vendored under `site/vendor/`, for the in-browser query.
+- GitHub Actions for `gofmt`, `go vet`, `staticcheck`, race tests, and the wasm smoke check. A second workflow publishes `site/` to GitHub Pages.
+- Python 3 is used only by `scripts/generate_retail.py` and `scripts/serve.py`. The ETL itself does not need Python.
+
 ## How to run
 
-Requires Go 1.22.2 or newer, as declared in `go.mod`. The SQLite driver is `modernc.org/sqlite` v1.34.5 (pure Go, no CGO). The first `go test` or `go run` downloads the module cache.
+Requires Go 1.22.2 or newer. The first `go test` or `go run` downloads the module cache. Run these from the repository root:
 
 ```bash
-go test -race -count=1 ./...
+test -z "$(gofmt -l .)"
 go vet ./...
+go test -race -count=1 ./...
 go run .
 ```
 
@@ -174,7 +187,7 @@ sqlite3 marketing_data.db < bonus_query.sql
 
 GitHub Actions (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `staticcheck` v0.5.1, `go test -race -count=1 ./...`, and `scripts/wasm-smoke.mjs` on Ubuntu. The workflow has `contents: read` and no secrets.
 
-Tests are table-driven and live in `etl_pipeline_test.go`. They cover timestamp parsing, the hash (including the no-separator collision), click and website transforms, dedup merge rules, comma rejoin for site details, a missing file, creation of a new database file, append-on-second-load, concurrent upserts, and a full load of the sample CSVs. They also run `runPipeline` on the Taller Norte texts and on a crafted visitor who clicked both ad platforms before a purchase: `bonus_query.sql` against those rows returns the same count as the Go predicate (17 on the sample, 1 on the crafted visitor). A short ad row is skipped and counted by `processGoogleClicks` and by `runPipeline`. Channel tests check that the earliest event wins regardless of arrival order. They share package-level state, so they stay sequential. `go test -race` is how the mutexes are checked.
+Tests are table-driven and live in `etl_pipeline_test.go`. They cover timestamp parsing, the hash (including the no-separator collision), click and website transforms, dedup merge rules, comma rejoin for site details, a missing file, creation of a new database file, append-on-second-load, concurrent upserts, and a full load of the sample CSVs. They also run `runPipeline` on the Taller Norte texts and on a crafted visitor who clicked both ad platforms before a purchase: `bonus_query.sql` against those rows returns the same count as the Go predicate (17 on the sample, 1 on the crafted visitor). A short ad row is skipped and counted by `processGoogleClicks` and by `runPipeline`, including when a later row in the same file is valid. Channel tests check that the earliest event wins regardless of arrival order. They share package-level state, so they stay sequential. `go test -race` is how the mutexes are checked.
 
 ## In the browser
 
@@ -231,8 +244,34 @@ The generator wrote 460 shoppers and 636 sessions. The pipeline stores one user 
 
 ROAS is `2463.30 / 760.91`. The page prints that quotient with two decimal places. Click cost averages about 0.84 and 31 of 907 clicks are followed by a purchase in the generator, so the ratio is the arithmetic of this file, not an industry benchmark.
 
-## Behavior worth knowing
+## Project structure
 
+```text
+.
+├── etl_pipeline.go        CSV ingest, tracking hash, and in-memory merge
+├── run_pipeline.go        in-memory run shared by tests and the wasm export
+├── sqlite_load.go         native SQLite load (build tag !js)
+├── main_native.go         CLI entry (build tag !js)
+├── main_wasm.go           browser entry (build tag js && wasm)
+├── etl_pipeline_test.go
+├── google_clicks.csv      synthetic Google Ads clicks
+├── facebook_clicks.csv    synthetic Facebook Ads clicks
+├── site_events.csv        synthetic website events
+├── bonus_query.sql        multi-channel converter count
+├── scripts/
+│   ├── generate_retail.py writes the three CSVs from seed 20260311
+│   ├── build-site.sh      builds site/etl.wasm and copies the CSVs
+│   ├── wasm-smoke.mjs     checks the wasm totals and bonus_query.sql
+│   └── serve.py           local static server for site/
+├── site/                  GitHub Pages UI, vendored sql.js, and IBM Plex fonts
+└── .github/workflows/     ci.yml and pages.yml
+```
+
+`marketing_data.db` is created in the working directory by `go run .` and is gitignored. `scripts/build-site.sh` writes `site/etl.wasm`, `site/wasm_exec.js`, `site/build.json`, and `site/data/`, which are also gitignored.
+
+## Limitations
+
+- The CSVs are synthetic. They are not an ad-platform export and they are not production traffic.
 - Ad-click metadata stores the campaign name under `ad_group` or `ad_set`. The ad group and ad set columns are not read.
 - A second run appends duplicate users and events. A browser run starts from an empty database.
 - `utm_channel` follows the earliest event, then the channel name. It does not follow whichever goroutine took the lock first.
@@ -240,3 +279,14 @@ ROAS is `2463.30 / 760.91`. The page prints that quotient with two decimal place
 - A Google or Facebook row with fewer than nine columns is skipped and counted. Website rows shorter than seven fields are skipped the same way.
 - User ids are not merged across sessions. On this sample, 17 tracked users still have both ad clicks before a conversion, because those clicks share one session and device.
 - Log lines for skipped rows and I/O failures are in Spanish. The success line is `ETL completado y datos cargados en marketing_data.db`.
+- There is no unique index on `tracking_hash`, no foreign key, and no cross-session identity resolution.
+- The Airbyte section is a design note. This program does not connect to Airbyte, Google Ads, or Facebook.
+
+## License
+
+The Go pipeline, tests, scripts, and site page are under the MIT license. See [LICENSE](LICENSE).
+
+Third-party files keep their own terms:
+
+- `site/vendor/` is [sql.js](https://github.com/sql-js/sql.js) 1.11.0 (MIT). See `site/vendor/sql.js.MIT.txt`.
+- `site/fonts/` is IBM Plex, under the SIL Open Font License. See `site/fonts/OFL.txt`.

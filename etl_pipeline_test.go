@@ -765,6 +765,27 @@ func TestRunPipelineRecoversShortAdRow(t *testing.T) {
 	}
 }
 
+func TestRunPipelineKeepsRowsAfterShortAdRecord(t *testing.T) {
+	google := strings.Join([]string{
+		"timestamp,user_id,session_key,device_type,campaign,ad_group,cost,utm_channel,gclid",
+		"2023-01-01 12:00:00,user-1,sess-short,mobile",
+		"2023-01-01 13:00:00,user-2,sess-ok,desktop,Camp,Group,0.40,google,G1",
+		"",
+	}, "\n")
+	got := runPipeline(
+		google,
+		"timestamp,user_id,session_key,device_type,campaign,ad_set,spend,utm_channel,fbclid\n",
+		"timestamp,user_id,session_key,device_type,action_type,action_details,utm_channel\n",
+	)
+	if len(got.Users) != 1 || len(got.Events) != 1 {
+		t.Fatalf("users=%d events=%d logs=%#v", len(got.Users), len(got.Events), got.Logs)
+	}
+	if got.Summary.SkippedRows != 1 || got.Events[0].Campaign != "Camp" {
+		t.Fatalf("skipped=%d event=%+v", got.Summary.SkippedRows, got.Events[0])
+	}
+	nearly(t, got.Events[0].Cost, 0.40)
+}
+
 func TestShortAdRowKeepsTheRestOfTheFile(t *testing.T) {
 	body := strings.Join([]string{
 		"timestamp,user_id,session_key,device_type,campaign,ad_group,cost,utm_channel,gclid",

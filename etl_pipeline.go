@@ -23,7 +23,7 @@ type TrackedUser struct {
 	UserID       string // Empty string when no source supplied an id. Filled in later only while still empty.
 	SessionKey   string
 	TrackingHash string
-	UTMChannel   string // Channel from the worker that created the row. Later rows do not replace it.
+	UTMChannel   string // Channel on the earliest event. Equal timestamps keep the name that sorts first.
 	Attributes   string // Always "{}" in this pipeline.
 	EarliestTime string // Minimum event timestamp, compared as text.
 	LatestTime   string // Maximum event timestamp, compared as text.
@@ -103,7 +103,8 @@ func parseTimestamp(ts string) (string, error) {
 }
 
 // readCSV opens path and returns every record. fieldsPerRecord 0 requires a
-// consistent column count; -1 allows the ragged website rows.
+// consistent column count. -1 allows a short row to be skipped later instead
+// of failing the whole file. Native workers and runPipeline pass -1.
 // The bool is false after a logged open or parse error.
 func readCSV(filePath string, fieldsPerRecord int) ([][]string, bool) {
 	file, err := os.Open(filePath)
